@@ -40,7 +40,7 @@ class PPOConfig:
     energy_loss: float = 0.02
     num_obstacles: int = 3
     food_cap: int = 100
-    vision_cost: float = 0.01
+    vision_cost: float = 0.05
     initial_view_size: float = 0.0
     reset_interval: int = 1024
 
@@ -63,6 +63,7 @@ class PPOConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     render_every: int = 100
     video_interval: float = 600.0  # save a video every N seconds
+    large_run: bool = False
 
     @property
     def batch_size(self) -> int:
@@ -82,45 +83,66 @@ class ActorCritic(nn.Module):
     Critic: outputs scalar value.
     """
 
-    def __init__(self, in_channels: int = TOTAL_CHANNELS, act_dim: int = NUM_ACTIONS):
+    def __init__(self, in_channels: int = TOTAL_CHANNELS, act_dim: int = NUM_ACTIONS, large: bool = False):
         super().__init__()
 
-        # Shared CNN backbone: 32x32 → 16x16 → 8x8 → 4x4 → 2x2
-        self.cnn = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),          # 32x32 → 16x16
-            nn.Conv2d(32, 64, 3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),          # 16x16 → 8x8
-            nn.Conv2d(64, 64, 3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2),          # 8x8 → 4x4
-            nn.AdaptiveMaxPool2d(2),  # 4x4 → 2x2
-            nn.Flatten(),
-        )
-        # 64 * 2 * 2 = 256
-        cnn_out = 64 * 2 * 2
+        if large:
+            # ~1M params: wider CNN + larger FC
+            self.cnn = nn.Sequential(
+                nn.Conv2d(in_channels, 64, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),          # 32x32 → 16x16
+                nn.Conv2d(64, 128, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),          # 16x16 → 8x8
+                nn.Conv2d(128, 128, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(128, 128, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),          # 8x8 → 4x4
+                nn.AdaptiveMaxPool2d(2),  # 4x4 → 2x2
+                nn.Flatten(),
+            )
+            cnn_out = 128 * 2 * 2  # 512
+            fc_hidden = 576
+        else:
+            # ~127K params
+            self.cnn = nn.Sequential(
+                nn.Conv2d(in_channels, 32, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),          # 32x32 → 16x16
+                nn.Conv2d(32, 64, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),          # 16x16 → 8x8
+                nn.Conv2d(64, 64, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2),          # 8x8 → 4x4
+                nn.AdaptiveMaxPool2d(2),  # 4x4 → 2x2
+                nn.Flatten(),
+            )
+            cnn_out = 64 * 2 * 2  # 256
+            fc_hidden = 256
 
         self.fc = nn.Sequential(
-            nn.Linear(cnn_out, 256),
+            nn.Linear(cnn_out, fc_hidden),
+            nn.ReLU(),
+            nn.Linear(fc_hidden, fc_hidden),
             nn.ReLU(),
         )
 
-        self.actor_mean = nn.Linear(256, act_dim)
-        self.critic_head = nn.Linear(256, 1)
+        self.actor_mean = nn.Linear(fc_hidden, act_dim)
+        self.critic_head = nn.Linear(fc_hidden, 1)
         self.log_std = nn.Parameter(torch.zeros(act_dim))
 
         # Init
-        for m in self.cnn:
-            if isinstance(m, nn.Conv2d):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
                 nn.init.zeros_(m.bias)
-        for m in [self.fc[0], self.critic_head]:
-            nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
-            nn.init.zeros_(m.bias)
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.01)
         nn.init.zeros_(self.actor_mean.bias)
+        nn.init.orthogonal_(self.critic_head.weight, gain=1.0)
+        nn.init.zeros_(self.critic_head.bias)
 
     def _encode(self, obs: torch.Tensor) -> torch.Tensor:
         # obs: (B, H, W, C) → (B, C, H, W)
@@ -331,7 +353,9 @@ def train(cfg: PPOConfig):
     np.random.seed(cfg.seed)
 
     env = make_env(cfg)
-    agent = ActorCritic().to(cfg.device)
+    agent = ActorCritic(large=cfg.large_run).to(cfg.device)
+    param_count = sum(p.numel() for p in agent.parameters())
+    print(f"         model params: {param_count:,} ({'large' if cfg.large_run else 'small'})")
     optimizer = optim.Adam(agent.parameters(), lr=cfg.lr, eps=1e-5)
     buf = RolloutBuffer(cfg)
 
@@ -535,6 +559,7 @@ def main():
     parser.add_argument("--render-every", type=int, default=100)
     parser.add_argument("--reset-interval", type=int, default=1024)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--large-run", action="store_true", help="Use ~1M param model")
     args = parser.parse_args()
 
     cfg = PPOConfig(
@@ -548,6 +573,7 @@ def main():
         render_every=args.render_every,
         reset_interval=args.reset_interval,
         device=args.device,
+        large_run=args.large_run,
     )
     train(cfg)
 
