@@ -70,6 +70,7 @@ impl EvolutionEnv {
         let view_res: usize = extract_or(config, "view_res", 32)?;
         let initial_view_size: f32 = extract_or(config, "initial_view_size", 2.0)?;
         let min_view_size: f32 = extract_or(config, "min_view_size", 0.0)?;
+        let energy_decay_rate: f32 = extract_or(config, "energy_decay_rate", 1.0)?;
         let obstacle_radius: f32 = extract_or(config, "obstacle_radius", object_radius)?;
 
         // --- interaction rules ---
@@ -109,6 +110,7 @@ impl EvolutionEnv {
             view_res,
             initial_view_size,
             min_view_size,
+            energy_decay_rate,
             interaction_rules: rules,
         };
 

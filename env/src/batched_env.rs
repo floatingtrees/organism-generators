@@ -202,6 +202,7 @@ mod tests {
             view_res: 8,
             initial_view_size: 2.0,
             min_view_size: 0.0,
+            energy_decay_rate: 1.0,
             interaction_rules: InteractionRules::default(),
         }
     }

@@ -47,6 +47,7 @@ class PPOConfig:
     initial_view_size: float = 3.0
     min_view_size: float = 2.0
     object_radius: float = 0.3
+    energy_decay_rate: float = 1.0
     reset_interval: int = 256
 
     # PPO
@@ -265,6 +266,7 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
         "vision_cost": cfg.vision_cost,
         "initial_view_size": cfg.initial_view_size,
         "min_view_size": cfg.min_view_size,
+        "energy_decay_rate": cfg.energy_decay_rate,
         "rules": {"agent_collision": cfg.agent_collision},
     })
 
@@ -337,6 +339,7 @@ def inference_loop(
         "vision_cost": cfg.vision_cost,
         "initial_view_size": cfg.initial_view_size,
         "min_view_size": cfg.min_view_size,
+        "energy_decay_rate": cfg.energy_decay_rate,
         "rules": {"agent_collision": cfg.agent_collision},
         "seed": seed,
     })

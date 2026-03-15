@@ -160,6 +160,11 @@ impl Environment {
 
             // Vision cost: vision_cost * view_size^2 per second (quadratic)
             agent.energy -= self.config.vision_cost * agent.view_size * agent.view_size * dt;
+
+            // Energy decay: energy *= decay_rate^dt (e.g. 0.95^0.2 per step for 5%/sec loss)
+            if self.config.energy_decay_rate < 1.0 {
+                agent.energy *= self.config.energy_decay_rate.powf(dt);
+            }
         }
 
         // 2. Update obstacle positions
@@ -771,6 +776,7 @@ mod tests {
             view_res: 8,      // small for fast tests
             initial_view_size: 2.0,
             min_view_size: 0.0,
+            energy_decay_rate: 1.0,
             interaction_rules: InteractionRules::default(),
         }
     }

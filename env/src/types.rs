@@ -158,6 +158,7 @@ pub struct EnvironmentConfig {
     pub view_res: usize,
     pub initial_view_size: f32,
     pub min_view_size: f32,
+    pub energy_decay_rate: f32,
     pub interaction_rules: InteractionRules,
 }
 
@@ -188,6 +189,7 @@ impl Default for EnvironmentConfig {
             view_res: 32,
             initial_view_size: 0.1,
             min_view_size: 0.0,
+            energy_decay_rate: 1.0, // 1.0 = no decay
             interaction_rules: InteractionRules::default(),
         }
     }
