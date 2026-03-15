@@ -46,8 +46,8 @@ def main():
                         help="Video duration in real-time seconds")
     parser.add_argument("--speed", type=float, default=3.0,
                         help="Playback speed multiplier (game seconds per real second)")
-    parser.add_argument("--dt", type=float, default=0.04,
-                        help="Simulation timestep for smooth video")
+    parser.add_argument("--dt", type=float, default=None,
+                        help="Simulation timestep (defaults to training dt)")
     parser.add_argument("--resolution", type=int, default=800,
                         help="Output image size (longest side in pixels)")
     parser.add_argument("--large-run", action="store_true")
@@ -57,14 +57,15 @@ def main():
 
     cfg = PPOConfig()
     device = args.device
+    dt = args.dt if args.dt is not None else cfg.dt
 
     # Compute steps needed
     sim_seconds = args.realtime_seconds * args.speed
-    num_steps = int(sim_seconds / args.dt)
-    fps = args.speed / args.dt
+    num_steps = int(sim_seconds / dt)
+    fps = args.speed / dt
 
     print(f"Inference: {sim_seconds:.0f}s sim time, {args.realtime_seconds:.0f}s real time at {args.speed}x")
-    print(f"           {num_steps} steps at dt={args.dt}, {fps:.0f} fps")
+    print(f"           {num_steps} steps at dt={dt}, {fps:.0f} fps")
 
     # Load model
     model = ActorCritic(large=args.large_run).to(device)
@@ -86,7 +87,7 @@ def main():
         "width": cfg.env_width,
         "food_spawn_rate": cfg.food_spawn_rate,
         "num_copies": 1,
-        "dt": args.dt,
+        "dt": dt,
         "energy_loss": cfg.energy_loss,
         "object_radius": cfg.object_radius,
         "num_obstacles": cfg.num_obstacles,

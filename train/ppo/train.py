@@ -37,7 +37,7 @@ class PPOConfig:
     env_width: float = 30.0
     env_height: float = 30.0
     food_spawn_rate: float = 100.0
-    dt: float = 0.2
+    dt: float = 0.15
     energy_loss: float = 0.02
     num_obstacles: int = 3
     obstacle_radius: float = 3.0
@@ -309,12 +309,12 @@ def inference_loop(
     model: ActorCritic,
     cfg: PPOConfig,
     output_path: str = "train/ppo/final.mp4",
-    video_dt: float = 0.04,
     num_steps: int = 8192,
-    target_resolution: int = 800,  # fixed output image size (longest side)
+    target_resolution: int = 800,
     seed: int = 9999,
-    speed_multiplier: float = 3.0,  # 3:1 = 3 game seconds per 1 real second
+    speed_multiplier: float = 3.0,
 ):
+    video_dt = cfg.dt  # same dt as training
     fps = speed_multiplier / video_dt
 
     # Scale pixels_per_unit so the image fits target_resolution
@@ -363,9 +363,7 @@ def inference_loop(
             video_env.step(act_np)
             obs, scalars, _ = env_observe(video_env, device)
 
-            # Reset at same sim-time as training: scale steps by dt ratio
-            video_reset_interval = int(cfg.reset_interval * cfg.dt / video_dt)
-            if (step + 1) % video_reset_interval == 0:
+            if (step + 1) % cfg.reset_interval == 0:
                 video_env.reset()
                 obs, scalars, _ = env_observe(video_env, device)
 
