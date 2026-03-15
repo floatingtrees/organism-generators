@@ -392,6 +392,10 @@ def train(cfg: PPOConfig):
     print(f"         training for {cfg.train_time:.0f}s wall-clock")
     print()
 
+    # --- Initial video (random policy) ---
+    print("Generating initial video (untrained policy)...")
+    inference_loop(model=agent, cfg=cfg, output_path="train/ppo/videos/initial_step0.mp4")
+
     while (time.time() - start_time) < cfg.train_time:
         update += 1
 
@@ -542,7 +546,8 @@ def train(cfg: PPOConfig):
 
         if cfg.render_every > 0 and update % cfg.render_every == 0:
             fname = f"train/ppo/render_update_{update:05d}.png"
-            env.render(fname, env_index=0, pixels_per_unit=30.0)
+            ppu = 800.0 / max(cfg.env_width, cfg.env_height)
+            env.render(fname, env_index=0, pixels_per_unit=ppu)
             print(f"  -> saved {fname}")
 
         # --- Periodic video checkpoint ---
