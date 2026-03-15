@@ -74,10 +74,11 @@ pub struct Agent {
     pub energy: f32,
     pub dead_steps: u32,
     pub alive: bool,
+    pub view_size: f32,
 }
 
 impl Agent {
-    pub fn new(id: usize, pos: Vec2) -> Self {
+    pub fn new(id: usize, pos: Vec2, initial_view_size: f32) -> Self {
         Self {
             id,
             pos,
@@ -85,6 +86,7 @@ impl Agent {
             energy: 10.0,
             dead_steps: 0,
             alive: true,
+            view_size: initial_view_size,
         }
     }
 }
@@ -150,6 +152,9 @@ pub struct EnvironmentConfig {
     pub obstacle_weight: f32,
     pub dead_steps_threshold: u32,
     pub food_cap: Option<usize>,
+    pub vision_cost: f32,
+    pub view_res: usize,
+    pub initial_view_size: f32,
     pub interaction_rules: InteractionRules,
 }
 
@@ -175,6 +180,9 @@ impl Default for EnvironmentConfig {
             obstacle_weight: 5.0,
             dead_steps_threshold: Self::dead_threshold_from_seconds(10.0, dt),
             food_cap: None,
+            vision_cost: 0.1,
+            view_res: 32,
+            initial_view_size: 2.0,
             interaction_rules: InteractionRules::default(),
         }
     }
@@ -228,7 +236,7 @@ mod tests {
 
     #[test]
     fn agent_defaults() {
-        let a = Agent::new(0, Vec2::new(1.0, 2.0));
+        let a = Agent::new(0, Vec2::new(1.0, 2.0), 2.0);
         assert_eq!(a.id, 0);
         assert!((a.energy - 10.0).abs() < 1e-6);
         assert!(a.alive);

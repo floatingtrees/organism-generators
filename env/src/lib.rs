@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::batched_env::BatchedEnvironment;
+use crate::environment::{NUM_ACTIONS, TOTAL_VIEW_CHANNELS};
 use crate::rendering::{render_environment, save_environment_png};
 use crate::types::*;
 
@@ -23,21 +24,6 @@ struct EvolutionEnv {
 
 #[pymethods]
 impl EvolutionEnv {
-    /// Create a new batched evolutionary environment.
-    ///
-    /// Config keys:
-    ///   num_organisms: int | list[int]   — agents per environment
-    ///   height: float
-    ///   width: float
-    ///   food_spawn_rate: float           — expected food items spawned per step
-    ///   num_copies: int                  — number of parallel environments
-    ///   dt: float                        — simulation timestep (default 0.5)
-    ///   energy_loss: float               — fraction of energy lost on wall bounce (default 0.1)
-    ///   object_radius: float             — collision radius (default 0.1)
-    ///   num_obstacles: int               — initial obstacles per env (default 0)
-    ///   obstacle_weight: float           — mass of obstacles (default 5.0)
-    ///   seed: int                        — base RNG seed (default 42)
-    ///   rules: dict                      — interaction rule toggles (optional)
     #[staticmethod]
     fn initialize(config: &Bound<'_, PyDict>) -> PyResult<Self> {
         // --- required ---
@@ -80,6 +66,9 @@ impl EvolutionEnv {
             Some(val) => Some(val.extract()?),
             None => None,
         };
+        let vision_cost: f32 = extract_or(config, "vision_cost", 0.1)?;
+        let view_res: usize = extract_or(config, "view_res", 32)?;
+        let initial_view_size: f32 = extract_or(config, "initial_view_size", 2.0)?;
 
         // --- interaction rules ---
         let mut rules = InteractionRules::default();
@@ -110,6 +99,9 @@ impl EvolutionEnv {
             obstacle_weight,
             dead_steps_threshold: EnvironmentConfig::dead_threshold_from_seconds(10.0, dt),
             food_cap,
+            vision_cost,
+            view_res,
+            initial_view_size,
             interaction_rules: rules,
         };
 
@@ -118,18 +110,12 @@ impl EvolutionEnv {
         Ok(Self { inner })
     }
 
-    /// Reset all environments to their initial state.
     fn reset(&mut self) {
         self.inner.reset();
     }
 
-    /// Advance one simulation step.
-    ///
-    /// Args:
-    ///     actions: numpy array of shape (num_envs, max_agents, 2) — acceleration vectors.
-    ///
-    /// Returns:
-    ///     numpy array of shape (num_envs, max_agents) — current energy (reward) per agent.
+    /// Step with actions of shape (num_envs, max_agents, 3) — (ax, ay, view_delta).
+    /// Returns rewards of shape (num_envs, max_agents).
     fn step<'py>(
         &mut self,
         py: Python<'py>,
@@ -139,20 +125,16 @@ impl EvolutionEnv {
         let ne = self.inner.num_envs();
         let ma = self.inner.max_agents;
 
-        if shape.len() != 3 || shape[0] != ne || shape[1] != ma || shape[2] != 2 {
+        if shape.len() != 3 || shape[0] != ne || shape[1] != ma || shape[2] != NUM_ACTIONS {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "actions must have shape ({}, {}, 2), got {:?}",
-                ne, ma, shape
+                "actions must have shape ({}, {}, {}), got {:?}",
+                ne, ma, NUM_ACTIONS, shape
             )));
         }
 
-        let slice = actions
-            .as_slice()
-            .map_err(|_| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "actions array must be C-contiguous",
-                )
-            })?;
+        let slice = actions.as_slice().map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("actions array must be C-contiguous")
+        })?;
 
         let rewards = self.inner.step(slice);
 
@@ -161,32 +143,32 @@ impl EvolutionEnv {
         Ok(arr.into_pyarray(py))
     }
 
-    /// Get observations for all environments.
-    ///
-    /// Returns:
-    ///     numpy (num_envs, max_agents, 5) — features: [x, y, vx, vy, alive]
-    ///     Padded agent slots are all zeros (alive=0).
-    fn observe<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+    /// Returns observations of shape (num_envs, max_agents, view_res, view_res, total_channels).
+    /// total_channels = 16 (4 object channels × 4 frames).
+    fn observe<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let ne = self.inner.num_envs();
         let ma = self.inner.max_agents;
-        let nf = BatchedEnvironment::NUM_FEATURES;
+        let res = self.inner.view_res();
+        let tc = TOTAL_VIEW_CHANNELS;
 
-        let features = self.inner.observe();
+        let obs = self.inner.observe();
 
-        let arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma, nf]), features)
+        let arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma, res, res, tc]), obs)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         Ok(arr.into_pyarray(py))
     }
 
-    /// Render a single environment and save as a PNG file.
-    ///
-    /// Args:
-    ///     filepath: path to save the PNG image
-    ///     env_index: which environment to render (default 0)
-    ///     pixels_per_unit: rendering resolution (default 20.0)
+    /// Returns alive mask of shape (num_envs, max_agents).
+    fn alive_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        let ne = self.inner.num_envs();
+        let ma = self.inner.max_agents;
+        let mask = self.inner.get_alive_mask();
+
+        let arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma]), mask)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(arr.into_pyarray(py))
+    }
+
     #[pyo3(signature = (filepath, env_index=None, pixels_per_unit=None))]
     fn render(
         &self,
@@ -196,7 +178,6 @@ impl EvolutionEnv {
     ) -> PyResult<()> {
         let idx = env_index.unwrap_or(0);
         let ppu = pixels_per_unit.unwrap_or(20.0);
-
         if idx >= self.inner.num_envs() {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                 "env_index {} out of range (num_envs = {})",
@@ -204,15 +185,10 @@ impl EvolutionEnv {
                 self.inner.num_envs()
             )));
         }
-
         save_environment_png(&self.inner.envs[idx], ppu, Path::new(filepath))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e))
     }
 
-    /// Render a single environment and return as a numpy array.
-    ///
-    /// Returns:
-    ///     numpy uint8 array of shape (H, W, 3)
     #[pyo3(signature = (env_index=None, pixels_per_unit=None))]
     fn render_array<'py>(
         &self,
@@ -222,7 +198,6 @@ impl EvolutionEnv {
     ) -> PyResult<Bound<'py, PyArrayDyn<u8>>> {
         let idx = env_index.unwrap_or(0);
         let ppu = pixels_per_unit.unwrap_or(20.0);
-
         if idx >= self.inner.num_envs() {
             return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                 "env_index {} out of range (num_envs = {})",
@@ -230,23 +205,35 @@ impl EvolutionEnv {
                 self.inner.num_envs()
             )));
         }
-
         let (buf, w, h) = render_environment(&self.inner.envs[idx], ppu);
         let arr = ArrayD::from_shape_vec(IxDyn(&[h, w, 3]), buf)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         Ok(arr.into_pyarray(py))
     }
 
-    /// Number of parallel environments.
     #[getter]
     fn num_envs(&self) -> usize {
         self.inner.num_envs()
     }
 
-    /// Maximum agents across all environments (pad dimension).
     #[getter]
     fn max_agents(&self) -> usize {
         self.inner.max_agents
+    }
+
+    #[getter]
+    fn view_res(&self) -> usize {
+        self.inner.view_res()
+    }
+
+    #[getter]
+    fn num_actions(&self) -> usize {
+        NUM_ACTIONS
+    }
+
+    #[getter]
+    fn total_channels(&self) -> usize {
+        TOTAL_VIEW_CHANNELS
     }
 }
 

@@ -179,6 +179,9 @@ mod tests {
             obstacle_weight: 5.0,
             dead_steps_threshold: 100,
             food_cap: None,
+            vision_cost: 0.0,
+            view_res: 8,
+            initial_view_size: 2.0,
             interaction_rules: InteractionRules::default(),
         }
     }

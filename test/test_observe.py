@@ -1,14 +1,15 @@
 import pytest
 import numpy as np
 import organism_env
-from conftest import zero_actions, X, Y, VX, VY, ALIVE, NUM_FEATURES
+from conftest import zero_actions, TOTAL_CHANNELS, NUM_ACTIONS
 
 
 class TestObserve:
     def test_shape(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
         obs = env.observe()
-        assert obs.shape == (2, 3, NUM_FEATURES)
+        r = env.view_res
+        assert obs.shape == (2, 3, r, r, TOTAL_CHANNELS)
 
     def test_dtype(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
@@ -18,85 +19,62 @@ class TestObserve:
     def test_variable_agent_shape(self, variable_config):
         env = organism_env.EvolutionEnv.initialize(variable_config)
         obs = env.observe()
-        # max_agents = max(3, 5, 2) = 5
-        assert obs.shape == (3, 5, NUM_FEATURES)
-
-    def test_alive_feature_for_real_agents(self, variable_config):
-        env = organism_env.EvolutionEnv.initialize(variable_config)
-        obs = env.observe()
-        # env 0 has 3 agents → alive=1 for first 3
-        assert np.all(obs[0, :3, ALIVE] == 1.0)
-        # env 1 has 5 agents → alive=1 for all
-        assert np.all(obs[1, :, ALIVE] == 1.0)
-        # env 2 has 2 agents → alive=1 for first 2
-        assert np.all(obs[2, :2, ALIVE] == 1.0)
+        r = env.view_res
+        assert obs.shape == (3, 5, r, r, TOTAL_CHANNELS)
 
     def test_padded_slots_are_zero(self, variable_config):
         env = organism_env.EvolutionEnv.initialize(variable_config)
         obs = env.observe()
-        # Padded agent slots should have all features = 0
+        # env 0 has 3 agents → slots 3,4 are zero
         np.testing.assert_array_equal(obs[0, 3:], 0.0)
+        # env 2 has 2 agents → slots 2,3,4 are zero
         np.testing.assert_array_equal(obs[2, 2:], 0.0)
 
-    def test_positions_change_after_step(self, deterministic_config):
-        env = organism_env.EvolutionEnv.initialize(deterministic_config)
-        obs0 = env.observe()
+    def test_alive_mask_shape(self, variable_config):
+        env = organism_env.EvolutionEnv.initialize(variable_config)
+        mask = env.alive_mask()
+        assert mask.shape == (3, 5)
+        assert mask[0, :3].sum() == 3
+        assert mask[1, :5].sum() == 5
+        assert mask[2, :2].sum() == 2
 
-        actions = zero_actions(env)
-        actions[0, 0] = [5.0, 3.0]
-        env.step(actions)
-
-        obs1 = env.observe()
-        assert not np.allclose(obs0[..., :2], obs1[..., :2])
-
-    def test_velocity_features(self, deterministic_config):
-        env = organism_env.EvolutionEnv.initialize(deterministic_config)
+    def test_food_appears_in_observation(self):
+        config = {
+            "num_organisms": 1, "height": 10.0, "width": 10.0,
+            "food_spawn_rate": 200.0, "num_copies": 1, "dt": 0.1,
+            "food_cap": 50, "seed": 42, "vision_cost": 0.0,
+        }
+        env = organism_env.EvolutionEnv.initialize(config)
+        env.step(zero_actions(env))  # spawn food
         obs = env.observe()
-        # Initial velocity should be zero
-        assert obs[0, 0, VX] == 0.0
-        assert obs[0, 0, VY] == 0.0
+        # Channel 0 = food (current frame)
+        assert (obs[0, 0, :, :, 0] > 0).any(), "food should be visible"
 
-        actions = zero_actions(env)
-        actions[0, 0] = [2.0, -1.0]
-        env.step(actions)
-
+    def test_history_channels_populate(self):
+        config = {
+            "num_organisms": 1, "height": 10.0, "width": 10.0,
+            "food_spawn_rate": 200.0, "num_copies": 1, "dt": 0.1,
+            "food_cap": 50, "seed": 42, "vision_cost": 0.0,
+        }
+        env = organism_env.EvolutionEnv.initialize(config)
+        for _ in range(5):
+            env.step(zero_actions(env))
         obs = env.observe()
-        dt = deterministic_config["dt"]
-        np.testing.assert_allclose(obs[0, 0, VX], 2.0 * dt, atol=1e-5)
-        np.testing.assert_allclose(obs[0, 0, VY], -1.0 * dt, atol=1e-5)
+        # History channels (4..16) should have some data
+        assert (obs[0, 0, :, :, 4:] > 0).any(), "history should be populated"
 
     def test_observe_after_reset(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
-
-        actions = np.ones((env.num_envs, env.max_agents, 2), dtype=np.float32) * 5.0
+        actions = np.ones((env.num_envs, env.max_agents, NUM_ACTIONS), dtype=np.float32) * 5.0
         for _ in range(10):
             env.step(actions)
-
         env.reset()
-        obs_reset = env.observe()
+        mask = env.alive_mask()
+        assert np.all(mask == 1.0)
 
-        # After reset: agents alive, zero velocity, valid positions
-        assert np.all(obs_reset[..., ALIVE] == 1.0)
-        np.testing.assert_array_equal(obs_reset[..., VX], 0.0)
-        np.testing.assert_array_equal(obs_reset[..., VY], 0.0)
-
-    def test_reset_produces_different_positions(self, small_config):
+    def test_reset_produces_different_obs(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
-        obs0 = env.observe()
+        obs0 = env.observe().copy()
         env.reset()
         obs1 = env.observe()
-        # Positions should differ after reset (different seed)
-        assert not np.allclose(obs0[..., :2], obs1[..., :2])
-
-    def test_positions_within_bounds(self, small_config):
-        env = organism_env.EvolutionEnv.initialize(small_config)
-        actions = np.random.randn(env.num_envs, env.max_agents, 2).astype(np.float32) * 10
-        for _ in range(100):
-            env.step(actions)
-
-        obs = env.observe()
-        alive = obs[..., ALIVE] == 1.0
-        xs = obs[..., X][alive]
-        ys = obs[..., Y][alive]
-        assert np.all(xs >= 0) and np.all(xs <= small_config["width"])
-        assert np.all(ys >= 0) and np.all(ys <= small_config["height"])
+        assert not np.array_equal(obs0, obs1)

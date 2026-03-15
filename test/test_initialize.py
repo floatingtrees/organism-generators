@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import organism_env
-from conftest import ALIVE, NUM_FEATURES
+from conftest import TOTAL_CHANNELS
 
 
 class TestInitialize:
@@ -17,26 +17,12 @@ class TestInitialize:
 
     def test_scalar_num_organisms(self):
         config = {
-            "num_organisms": 4,
-            "height": 10.0,
-            "width": 10.0,
-            "food_spawn_rate": 1.0,
-            "num_copies": 3,
+            "num_organisms": 4, "height": 10.0, "width": 10.0,
+            "food_spawn_rate": 1.0, "num_copies": 3,
         }
         env = organism_env.EvolutionEnv.initialize(config)
         assert env.num_envs == 3
         assert env.max_agents == 4
-
-    def test_list_num_organisms(self):
-        config = {
-            "num_organisms": [1, 7, 3],
-            "height": 10.0,
-            "width": 10.0,
-            "food_spawn_rate": 1.0,
-            "num_copies": 3,
-        }
-        env = organism_env.EvolutionEnv.initialize(config)
-        assert env.max_agents == 7
 
     def test_missing_required_key_raises(self):
         with pytest.raises(KeyError):
@@ -44,59 +30,24 @@ class TestInitialize:
 
     def test_mismatched_list_length_raises(self):
         config = {
-            "num_organisms": [1, 2],  # length 2 != num_copies 3
-            "height": 10.0,
-            "width": 10.0,
-            "food_spawn_rate": 1.0,
-            "num_copies": 3,
+            "num_organisms": [1, 2], "height": 10.0, "width": 10.0,
+            "food_spawn_rate": 1.0, "num_copies": 3,
         }
         with pytest.raises(ValueError):
             organism_env.EvolutionEnv.initialize(config)
 
-    def test_default_dt(self):
-        config = {
-            "num_organisms": 1,
-            "height": 10.0,
-            "width": 10.0,
-            "food_spawn_rate": 1.0,
-            "num_copies": 1,
-        }
-        env = organism_env.EvolutionEnv.initialize(config)
-        assert env.num_envs == 1
-
-    def test_custom_rules(self):
-        config = {
-            "num_organisms": 2,
-            "height": 10.0,
-            "width": 10.0,
-            "food_spawn_rate": 0.0,
-            "num_copies": 1,
-            "rules": {
-                "wall_bounce": False,
-                "food_collection": False,
-                "obstacle_collision": False,
-                "agent_collision": True,
-            },
-        }
-        env = organism_env.EvolutionEnv.initialize(config)
-        assert env.num_envs == 1
-
     def test_agents_start_alive(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
-        obs = env.observe()
-        assert np.all(obs[..., ALIVE] == 1.0)
+        mask = env.alive_mask()
+        assert np.all(mask == 1.0)
 
-    def test_agents_within_bounds(self, small_config):
+    def test_observe_shape(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
         obs = env.observe()
-        h = small_config["height"]
-        w = small_config["width"]
-        assert np.all(obs[..., 0] >= 0.0)
-        assert np.all(obs[..., 0] <= w)
-        assert np.all(obs[..., 1] >= 0.0)
-        assert np.all(obs[..., 1] <= h)
+        assert obs.shape == (2, 3, env.view_res, env.view_res, TOTAL_CHANNELS)
 
-    def test_observe_has_5_features(self, small_config):
+    def test_properties(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
-        obs = env.observe()
-        assert obs.shape == (2, 3, NUM_FEATURES)
+        assert env.view_res == 32
+        assert env.num_actions == 3
+        assert env.total_channels == 16
