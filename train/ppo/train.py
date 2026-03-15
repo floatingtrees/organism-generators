@@ -32,14 +32,14 @@ TOTAL_CHANNELS = 16  # 4 object channels × 4 temporal frames
 class PPOConfig:
     # Environment
     num_envs: int = 32
-    num_agents: int = 10
-    env_width: float = 15.0
-    env_height: float = 15.0
+    num_agents: int = 20
+    env_width: float = 30.0
+    env_height: float = 30.0
     food_spawn_rate: float = 100.0
     dt: float = 0.2
     energy_loss: float = 0.02
     num_obstacles: int = 3
-    food_cap: int = 200
+    food_cap: int = 800
     vision_cost: float = 0.01
     initial_view_size: float = 3.0
     object_radius: float = 0.3
@@ -290,15 +290,19 @@ def inference_loop(
     output_path: str = "train/ppo/final.mp4",
     video_dt: float = 0.04,
     num_steps: int = 8192,
-    pixels_per_unit: float = 40.0,
+    target_resolution: int = 800,  # fixed output image size (longest side)
     seed: int = 9999,
     speed_multiplier: float = 3.0,  # 3:1 = 3 game seconds per 1 real second
 ):
     fps = speed_multiplier / video_dt
 
-    raw_px = int(cfg.env_width * pixels_per_unit)
+    # Scale pixels_per_unit so the image fits target_resolution
+    max_dim = max(cfg.env_width, cfg.env_height)
+    pixels_per_unit = target_resolution / max_dim
+    # Round to multiple of 16 for codec compatibility
+    raw_px = int(max_dim * pixels_per_unit)
     if raw_px % 16 != 0:
-        pixels_per_unit = (((raw_px + 15) // 16) * 16) / cfg.env_width
+        pixels_per_unit = (((raw_px + 15) // 16) * 16) / max_dim
 
     video_env = organism_env.EvolutionEnv.initialize({
         "num_organisms": cfg.num_agents,
