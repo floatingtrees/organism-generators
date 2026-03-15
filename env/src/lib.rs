@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::batched_env::BatchedEnvironment;
-use crate::rendering::save_environment_png;
+use crate::rendering::{render_environment, save_environment_png};
 use crate::types::*;
 
 use std::path::Path;
@@ -197,6 +197,34 @@ impl EvolutionEnv {
 
         save_environment_png(&self.inner.envs[idx], ppu, Path::new(filepath))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e))
+    }
+
+    /// Render a single environment and return as a numpy array.
+    ///
+    /// Returns:
+    ///     numpy uint8 array of shape (H, W, 3)
+    #[pyo3(signature = (env_index=None, pixels_per_unit=None))]
+    fn render_array<'py>(
+        &self,
+        py: Python<'py>,
+        env_index: Option<usize>,
+        pixels_per_unit: Option<f32>,
+    ) -> PyResult<Bound<'py, PyArrayDyn<u8>>> {
+        let idx = env_index.unwrap_or(0);
+        let ppu = pixels_per_unit.unwrap_or(20.0);
+
+        if idx >= self.inner.num_envs() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "env_index {} out of range (num_envs = {})",
+                idx,
+                self.inner.num_envs()
+            )));
+        }
+
+        let (buf, w, h) = render_environment(&self.inner.envs[idx], ppu);
+        let arr = ArrayD::from_shape_vec(IxDyn(&[h, w, 3]), buf)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(arr.into_pyarray(py))
     }
 
     /// Number of parallel environments.

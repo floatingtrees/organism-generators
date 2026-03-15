@@ -2,13 +2,14 @@
 
 Usage:
     python train/ppo/train.py
-    python train/ppo/train.py --num-envs 64 --num-agents 8 --total-steps 500000
+    python train/ppo/train.py --num-envs 64 --num-agents 8 --train-time 600
 """
 
 import argparse
 import time
 from dataclasses import dataclass
 
+import imageio.v3 as iio
 import numpy as np
 import torch
 import torch.nn as nn
@@ -38,10 +39,10 @@ class PPOConfig:
     dt: float = 0.2
     energy_loss: float = 0.02
     num_obstacles: int = 3
-    reset_interval: int = 256  # reset envs every N rollout steps to keep agents alive
+    reset_interval: int = 1024
 
     # PPO
-    total_steps: int = 200_000
+    train_time: float = 600.0  # seconds of wall-clock training
     rollout_len: int = 128
     gamma: float = 0.99
     gae_lambda: float = 0.95
@@ -57,19 +58,11 @@ class PPOConfig:
     # Misc
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    render_every: int = 50  # render a snapshot every N updates (0 to disable)
+    render_every: int = 100  # render a snapshot every N updates (0 to disable)
 
     @property
     def batch_size(self) -> int:
         return self.num_envs * self.num_agents * self.rollout_len
-
-    @property
-    def minibatch_size(self) -> int:
-        return self.batch_size // self.num_minibatches
-
-    @property
-    def num_updates(self) -> int:
-        return self.total_steps // (self.num_envs * self.num_agents * self.rollout_len)
 
 
 # ---------------------------------------------------------------------------
@@ -78,14 +71,6 @@ class PPOConfig:
 
 
 class ActorCritic(nn.Module):
-    """Shared-backbone actor-critic with Gaussian policy.
-
-    Each agent is processed independently (parameter sharing).
-    Input: per-agent features [x, y, vx, vy, alive] (5,)
-    Actor output: mean of (ax, ay)
-    Critic output: scalar state value
-    """
-
     def __init__(self, obs_dim: int = NUM_OBS_FEATURES, act_dim: int = NUM_ACTIONS):
         super().__init__()
         self.backbone = nn.Sequential(
@@ -137,7 +122,6 @@ class RolloutBuffer:
         self.rewards = torch.zeros(T, n, device=dev)
         self.values = torch.zeros(T, n, device=dev)
         self.alive = torch.zeros(T, n, device=dev)
-
         self.cfg = cfg
         self.step = 0
 
@@ -152,20 +136,13 @@ class RolloutBuffer:
 
     def compute_gae(self, next_value: torch.Tensor, next_alive: torch.Tensor):
         T = self.cfg.rollout_len
-        gamma = self.cfg.gamma
-        lam = self.cfg.gae_lambda
-
+        gamma, lam = self.cfg.gamma, self.cfg.gae_lambda
         advantages = torch.zeros_like(self.rewards)
         last_gae = torch.zeros_like(next_value)
 
         for t in reversed(range(T)):
-            if t == T - 1:
-                next_val = next_value
-                next_mask = next_alive
-            else:
-                next_val = self.values[t + 1]
-                next_mask = self.alive[t + 1]
-
+            next_val = next_value if t == T - 1 else self.values[t + 1]
+            next_mask = next_alive if t == T - 1 else self.alive[t + 1]
             mask = self.alive[t]
             delta = self.rewards[t] + gamma * next_val * next_mask - self.values[t]
             last_gae = delta + gamma * lam * next_mask * last_gae
@@ -176,10 +153,7 @@ class RolloutBuffer:
         self.step = 0
 
     def get_batches(self, num_minibatches: int):
-        n = self.cfg.num_envs * self.cfg.num_agents
-        T = self.cfg.rollout_len
-        total = T * n
-
+        total = self.cfg.rollout_len * self.cfg.num_envs * self.cfg.num_agents
         obs = self.obs.reshape(total, -1)
         actions = self.actions.reshape(total, -1)
         log_probs = self.log_probs.reshape(total)
@@ -192,23 +166,16 @@ class RolloutBuffer:
 
         for start in range(0, total, mb_size):
             idx = indices[start : start + mb_size]
-            yield (
-                obs[idx],
-                actions[idx],
-                log_probs[idx],
-                advantages[idx],
-                returns[idx],
-                alive[idx],
-            )
+            yield obs[idx], actions[idx], log_probs[idx], advantages[idx], returns[idx], alive[idx]
 
 
 # ---------------------------------------------------------------------------
-# Environment wrapper
+# Environment helpers
 # ---------------------------------------------------------------------------
 
 
-def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
-    config = {
+def make_env(cfg: PPOConfig, seed: int | None = None) -> organism_env.EvolutionEnv:
+    return organism_env.EvolutionEnv.initialize({
         "num_organisms": cfg.num_agents,
         "height": cfg.env_height,
         "width": cfg.env_width,
@@ -217,26 +184,105 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
         "dt": cfg.dt,
         "energy_loss": cfg.energy_loss,
         "num_obstacles": cfg.num_obstacles,
-        "seed": cfg.seed,
-    }
-    return organism_env.EvolutionEnv.initialize(config)
+        "seed": seed if seed is not None else cfg.seed,
+    })
 
 
 def env_observe(env, device: str) -> torch.Tensor:
-    """Get observations as a flat (num_envs * num_agents, features) tensor on device."""
-    obs_np = env.observe()  # (num_envs, max_agents, 5)
-    return torch.from_numpy(obs_np).reshape(-1, NUM_OBS_FEATURES).to(device)
+    return torch.from_numpy(env.observe()).reshape(-1, NUM_OBS_FEATURES).to(device)
 
 
-def env_step(env, actions: torch.Tensor, cfg: PPOConfig):
-    """Step the environment, return (energy, obs) as flat tensors."""
-    act_np = actions.reshape(cfg.num_envs, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
-    energy_np = env.step(act_np)  # (num_envs, max_agents) — current energy per agent
-    obs_np = env.observe()  # (num_envs, max_agents, 5)
+def env_step(env, actions: torch.Tensor, num_envs: int, num_agents: int, device: str):
+    act_np = actions.reshape(num_envs, num_agents, NUM_ACTIONS).cpu().numpy()
+    energy_np = env.step(act_np)
+    obs_np = env.observe()
+    return (
+        torch.from_numpy(energy_np).reshape(-1).to(device),
+        torch.from_numpy(obs_np).reshape(-1, NUM_OBS_FEATURES).to(device),
+    )
 
-    energy = torch.from_numpy(energy_np).reshape(-1).to(cfg.device)
-    obs = torch.from_numpy(obs_np).reshape(-1, NUM_OBS_FEATURES).to(cfg.device)
-    return energy, obs
+
+# ---------------------------------------------------------------------------
+# Inference loop → video
+# ---------------------------------------------------------------------------
+
+
+def inference_loop(
+    model: ActorCritic,
+    cfg: PPOConfig,
+    output_path: str = "train/ppo/final.mp4",
+    video_dt: float = 0.04,
+    num_steps: int = 1024,
+    pixels_per_unit: float = 40.0,
+    seed: int = 9999,
+):
+    """Run the trained policy and capture frames into an mp4 video.
+
+    Uses a lower dt for smooth rendering. Video frame rate is 1:1 with
+    simulation time (fps = 1 / video_dt).
+    """
+    fps = 1.0 / video_dt
+
+    # Use a resolution divisible by 16 (macro_block_size) to avoid ffmpeg resize warning
+    raw_px = int(cfg.env_width * pixels_per_unit)
+    if raw_px % 16 != 0:
+        pixels_per_unit = (((raw_px + 15) // 16) * 16) / cfg.env_width
+
+    # Create a single-copy env with the low dt for smooth video
+    video_env = organism_env.EvolutionEnv.initialize({
+        "num_organisms": cfg.num_agents,
+        "height": cfg.env_height,
+        "width": cfg.env_width,
+        "food_spawn_rate": cfg.food_spawn_rate,
+        "num_copies": 1,
+        "dt": video_dt,
+        "energy_loss": cfg.energy_loss,
+        "num_obstacles": cfg.num_obstacles,
+        "seed": seed,
+    })
+
+    model.eval()
+    device = cfg.device
+    reset_count = 0
+
+    frames = []
+    obs = torch.from_numpy(video_env.observe()).reshape(-1, NUM_OBS_FEATURES).to(device)
+
+    with torch.no_grad():
+        for step in range(num_steps):
+            # Capture frame
+            frame = video_env.render_array(env_index=0, pixels_per_unit=pixels_per_unit)
+            frames.append(frame)
+
+            # Get action from policy
+            action, _, _, _ = model.get_action_and_value(obs)
+
+            # Step
+            act_np = action.reshape(1, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
+            video_env.step(act_np)
+            obs = torch.from_numpy(video_env.observe()).reshape(-1, NUM_OBS_FEATURES).to(device)
+
+            # Reset with different seed every 1024 steps
+            if (step + 1) % 1024 == 0:
+                reset_count += 1
+                video_env = organism_env.EvolutionEnv.initialize({
+                    "num_organisms": cfg.num_agents,
+                    "height": cfg.env_height,
+                    "width": cfg.env_width,
+                    "food_spawn_rate": cfg.food_spawn_rate,
+                    "num_copies": 1,
+                    "dt": video_dt,
+                    "energy_loss": cfg.energy_loss,
+                    "num_obstacles": cfg.num_obstacles,
+                    "seed": seed + reset_count * 1000,
+                })
+                obs = torch.from_numpy(video_env.observe()).reshape(-1, NUM_OBS_FEATURES).to(device)
+
+    # Write video
+    frames_arr = np.stack(frames)
+    iio.imwrite(output_path, frames_arr, fps=fps, codec="libx264")
+    duration = num_steps * video_dt
+    print(f"Video saved: {output_path} ({len(frames)} frames, {duration:.1f}s sim time, {fps:.0f} fps)")
 
 
 # ---------------------------------------------------------------------------
@@ -248,29 +294,33 @@ def train(cfg: PPOConfig):
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    env = make_env(cfg)
+    reset_count = 0
+    env = make_env(cfg, seed=cfg.seed)
     agent = ActorCritic().to(cfg.device)
     optimizer = optim.Adam(agent.parameters(), lr=cfg.lr, eps=1e-5)
     buf = RolloutBuffer(cfg)
 
     n = cfg.num_envs * cfg.num_agents
     obs = env_observe(env, cfg.device)
-    prev_energy = obs[:, ALIVE] * 10.0  # initial energy for alive agents
+    prev_energy = obs[:, ALIVE] * 10.0
     global_step = 0
     env_steps_since_reset = 0
     start_time = time.time()
+    update = 0
 
-    num_updates = cfg.num_updates
     print(f"PPO | device={cfg.device} | envs={cfg.num_envs} | agents={cfg.num_agents}")
-    print(f"     rollout={cfg.rollout_len} | batch={cfg.batch_size} | updates={num_updates}")
-    print(f"     total_steps={cfg.total_steps:,}")
+    print(f"     rollout={cfg.rollout_len} | batch={cfg.batch_size}")
+    print(f"     training for {cfg.train_time:.0f}s wall-clock")
     print()
 
-    for update in range(1, num_updates + 1):
-        # Anneal LR
+    while (time.time() - start_time) < cfg.train_time:
+        update += 1
+
+        # Anneal LR based on time fraction
         if cfg.anneal_lr:
-            frac = 1.0 - (update - 1) / num_updates
-            optimizer.param_groups[0]["lr"] = cfg.lr * frac
+            elapsed = time.time() - start_time
+            frac = 1.0 - elapsed / cfg.train_time
+            optimizer.param_groups[0]["lr"] = cfg.lr * max(frac, 0.0)
 
         # --- Collect rollout ---
         ep_rewards = []
@@ -283,12 +333,7 @@ def train(cfg: PPOConfig):
                 action, log_prob, _, value = agent.get_action_and_value(obs)
 
             alive = obs[:, ALIVE]
-
-            # Step env — returns current energy
-            energy, next_obs = env_step(env, action, cfg)
-
-            # Reward = change in energy (positive = gained energy from food,
-            # negative = spent energy on acceleration or lost to wall bounce)
+            energy, next_obs = env_step(env, action, cfg.num_envs, cfg.num_agents, cfg.device)
             reward = (energy - prev_energy) * alive
             prev_energy = energy.clone()
 
@@ -297,9 +342,10 @@ def train(cfg: PPOConfig):
 
             ep_rewards.append(reward[alive > 0].mean().item() if (alive > 0).any() else 0.0)
 
-            # Periodic reset so agents get fresh starts
+            # Reset with different seed every reset_interval steps
             if env_steps_since_reset >= cfg.reset_interval:
-                env.reset()
+                reset_count += 1
+                env = make_env(cfg, seed=cfg.seed + reset_count * 97)
                 obs = env_observe(env, cfg.device)
                 prev_energy = obs[:, ALIVE] * 10.0
                 env_steps_since_reset = 0
@@ -323,7 +369,6 @@ def train(cfg: PPOConfig):
             ):
                 _, new_lp, entropy, new_val = agent.get_action_and_value(mb_obs, mb_act)
 
-                # Normalize advantages (alive agents only)
                 alive_mask = mb_alive > 0
                 if alive_mask.sum() > 1:
                     adv_alive = mb_adv[alive_mask]
@@ -333,16 +378,12 @@ def train(cfg: PPOConfig):
                         torch.zeros_like(mb_adv),
                     )
 
-                # Policy loss (clipped)
                 ratio = (new_lp - mb_old_lp).exp()
                 pg_loss1 = -mb_adv * ratio
                 pg_loss2 = -mb_adv * ratio.clamp(1 - cfg.clip_eps, 1 + cfg.clip_eps)
                 pg_loss = (torch.max(pg_loss1, pg_loss2) * mb_alive).sum() / mb_alive.sum().clamp(min=1)
 
-                # Value loss
                 vf_loss = ((new_val - mb_ret) ** 2 * mb_alive).sum() / mb_alive.sum().clamp(min=1)
-
-                # Entropy bonus
                 ent_loss = (entropy * mb_alive).sum() / mb_alive.sum().clamp(min=1)
 
                 loss = pg_loss + cfg.vf_coef * vf_loss - cfg.ent_coef * ent_loss
@@ -364,27 +405,25 @@ def train(cfg: PPOConfig):
         # --- Logging ---
         elapsed = time.time() - start_time
         sps = global_step / elapsed
-        avg_pg = total_pg_loss / num_batches
-        avg_vf = total_vf_loss / num_batches
-        avg_ent = total_ent_loss / num_batches
-        avg_clip = total_clip_frac / num_batches
         mean_ep_reward = np.mean(ep_rewards)
 
         cur_obs = env_observe(env, cfg.device)
         alive_count = int((cur_obs[:, ALIVE] > 0).sum().item())
 
-        print(
-            f"update {update:4d}/{num_updates} | "
-            f"step {global_step:>9,} | "
-            f"sps {sps:>7,.0f} | "
-            f"reward {mean_ep_reward:+.4f} | "
-            f"pg {avg_pg:+.4f} | "
-            f"vf {avg_vf:.4f} | "
-            f"ent {avg_ent:.3f} | "
-            f"clip {avg_clip:.2f} | "
-            f"alive {alive_count}/{n} | "
-            f"lr {optimizer.param_groups[0]['lr']:.1e}"
-        )
+        if update % 10 == 0 or update <= 3:
+            print(
+                f"update {update:4d} | "
+                f"t={elapsed:5.0f}s/{cfg.train_time:.0f}s | "
+                f"step {global_step:>10,} | "
+                f"sps {sps:>8,.0f} | "
+                f"reward {mean_ep_reward:+.4f} | "
+                f"pg {total_pg_loss / num_batches:+.4f} | "
+                f"vf {total_vf_loss / num_batches:.3f} | "
+                f"ent {total_ent_loss / num_batches:.3f} | "
+                f"clip {total_clip_frac / num_batches:.3f} | "
+                f"alive {alive_count}/{n} | "
+                f"lr {optimizer.param_groups[0]['lr']:.1e}"
+            )
 
         # --- Render snapshot ---
         if cfg.render_every > 0 and update % cfg.render_every == 0:
@@ -392,12 +431,24 @@ def train(cfg: PPOConfig):
             env.render(fname, env_index=0, pixels_per_unit=30.0)
             print(f"  -> saved {fname}")
 
-    # Save final model
+    # --- Save model ---
     torch.save(agent.state_dict(), "train/ppo/model_final.pt")
-    print(f"\nTraining complete. Model saved to train/ppo/model_final.pt")
+    total_elapsed = time.time() - start_time
+    print(f"\nTraining done: {update} updates, {global_step:,} steps in {total_elapsed:.1f}s")
+    print(f"Model saved to train/ppo/model_final.pt")
 
-    env.render("train/ppo/render_final.png", env_index=0, pixels_per_unit=30.0)
-    print("Final render saved to train/ppo/render_final.png")
+    # --- Generate final video ---
+    print("\nGenerating inference video...")
+    inference_loop(
+        model=agent,
+        cfg=cfg,
+        output_path="train/ppo/final.mp4",
+        video_dt=0.04,
+        num_steps=2048,
+        pixels_per_unit=40.0,
+    )
+
+    return agent
 
 
 # ---------------------------------------------------------------------------
@@ -407,22 +458,22 @@ def train(cfg: PPOConfig):
 
 def main():
     parser = argparse.ArgumentParser(description="PPO training for organism environment")
-    parser.add_argument("--num-envs", type=int, default=32)
+    parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--num-agents", type=int, default=5)
-    parser.add_argument("--total-steps", type=int, default=200_000)
+    parser.add_argument("--train-time", type=float, default=600.0, help="Wall-clock training seconds")
     parser.add_argument("--rollout-len", type=int, default=128)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--num-epochs", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--render-every", type=int, default=50)
-    parser.add_argument("--reset-interval", type=int, default=256)
+    parser.add_argument("--render-every", type=int, default=100)
+    parser.add_argument("--reset-interval", type=int, default=1024)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     cfg = PPOConfig(
         num_envs=args.num_envs,
         num_agents=args.num_agents,
-        total_steps=args.total_steps,
+        train_time=args.train_time,
         rollout_len=args.rollout_len,
         lr=args.lr,
         num_epochs=args.num_epochs,
