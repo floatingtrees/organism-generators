@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn padding_is_zero() {
         let be = BatchedEnvironment::new(vec![2], test_config(), 42);
-        let (features, mask) = be.observe();
+        let (_features, mask) = be.observe();
         // Only 2 agents, max=2, so all should be valid
         assert_eq!(mask.len(), 2);
         assert!((mask[0] - 1.0).abs() < 1e-6);
