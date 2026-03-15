@@ -133,6 +133,7 @@ mod tests {
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,
             dead_steps_threshold: 100,
+            food_cap: None,
             interaction_rules: InteractionRules::default(),
         }
     }

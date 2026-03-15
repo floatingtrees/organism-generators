@@ -149,6 +149,7 @@ pub struct EnvironmentConfig {
     pub num_initial_obstacles: usize,
     pub obstacle_weight: f32,
     pub dead_steps_threshold: u32,
+    pub food_cap: Option<usize>,
     pub interaction_rules: InteractionRules,
 }
 
@@ -173,6 +174,7 @@ impl Default for EnvironmentConfig {
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,
             dead_steps_threshold: Self::dead_threshold_from_seconds(10.0, dt),
+            food_cap: None,
             interaction_rules: InteractionRules::default(),
         }
     }

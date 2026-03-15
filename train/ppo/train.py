@@ -39,6 +39,7 @@ class PPOConfig:
     dt: float = 0.2
     energy_loss: float = 0.02
     num_obstacles: int = 3
+    food_cap: int = 100
     reset_interval: int = 1024
 
     # PPO
@@ -184,6 +185,7 @@ def make_env(cfg: PPOConfig, seed: int | None = None) -> organism_env.EvolutionE
         "dt": cfg.dt,
         "energy_loss": cfg.energy_loss,
         "num_obstacles": cfg.num_obstacles,
+        "food_cap": cfg.food_cap,
         "seed": seed if seed is not None else cfg.seed,
     })
 
@@ -238,6 +240,7 @@ def inference_loop(
         "dt": video_dt,
         "energy_loss": cfg.energy_loss,
         "num_obstacles": cfg.num_obstacles,
+        "food_cap": cfg.food_cap,
         "seed": seed,
     })
 

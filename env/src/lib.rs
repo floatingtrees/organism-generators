@@ -71,6 +71,10 @@ impl EvolutionEnv {
         let num_obstacles: usize = extract_or(config, "num_obstacles", 0)?;
         let obstacle_weight: f32 = extract_or(config, "obstacle_weight", 5.0)?;
         let seed: u64 = extract_or(config, "seed", 42)?;
+        let food_cap: Option<usize> = match config.get_item("food_cap")? {
+            Some(val) => Some(val.extract()?),
+            None => None,
+        };
 
         // --- interaction rules ---
         let mut rules = InteractionRules::default();
@@ -100,6 +104,7 @@ impl EvolutionEnv {
             num_initial_obstacles: num_obstacles,
             obstacle_weight,
             dead_steps_threshold: EnvironmentConfig::dead_threshold_from_seconds(10.0, dt),
+            food_cap,
             interaction_rules: rules,
         };
 

@@ -363,6 +363,13 @@ impl Environment {
     // ------------------------------------------------------------------
 
     fn spawn_food(&mut self) {
+        // Skip spawning if food count is at or above cap
+        if let Some(cap) = self.config.food_cap {
+            if self.foods.len() >= cap {
+                return;
+            }
+        }
+
         let rate = self.config.food_spawn_rate;
         let num_to_spawn = rate as usize;
         let fractional = rate - num_to_spawn as f32;
@@ -370,6 +377,12 @@ impl Environment {
         let mut total = num_to_spawn;
         if self.rng.gen::<f32>() < fractional {
             total += 1;
+        }
+
+        // Clamp to cap if set
+        if let Some(cap) = self.config.food_cap {
+            let room = cap.saturating_sub(self.foods.len());
+            total = total.min(room);
         }
 
         let r = self.config.object_radius;
@@ -431,6 +444,7 @@ mod tests {
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,
             dead_steps_threshold: 100,
+            food_cap: None,
             interaction_rules: InteractionRules::default(),
         }
     }
