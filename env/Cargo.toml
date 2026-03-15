@@ -12,6 +12,7 @@ pyo3 = "0.24"
 numpy = "0.24"
 ndarray = "0.16"
 rand = { version = "0.8", features = ["small_rng"] }
+rayon = "1.10"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [features]

@@ -1,7 +1,8 @@
-/// Batched wrapper that runs multiple environments in parallel (logically).
+/// Batched wrapper that runs multiple environments in parallel via rayon.
 
 use crate::environment::{Environment, NUM_ACTIONS, TOTAL_VIEW_CHANNELS};
 use crate::types::EnvironmentConfig;
+use rayon::prelude::*;
 
 pub struct BatchedEnvironment {
     pub envs: Vec<Environment>,
@@ -34,63 +35,68 @@ impl BatchedEnvironment {
     }
 
     // ------------------------------------------------------------------
-    // Reset
+    // Reset (parallel)
     // ------------------------------------------------------------------
 
     pub fn reset(&mut self) {
-        for env in &mut self.envs {
-            env.reset();
-        }
+        self.envs.par_iter_mut().for_each(|env| env.reset());
         self.max_agents = self.envs.iter().map(|e| e.num_agents()).max().unwrap_or(0);
     }
 
     // ------------------------------------------------------------------
-    // Step
+    // Step (parallel)
     // ------------------------------------------------------------------
 
-    /// `actions` flat slice: [num_envs * max_agents * 3] — (ax, ay, view_delta) per agent.
+    /// `actions` flat slice: [num_envs * max_agents * 3].
     pub fn step(&mut self, actions: &[f32]) -> Vec<f32> {
         let max_a = self.max_agents;
 
-        for (i, env) in self.envs.iter_mut().enumerate() {
-            let n = env.num_agents();
-            let env_actions: Vec<(f32, f32, f32)> = (0..n)
-                .map(|j| {
-                    let base = (i * max_a + j) * NUM_ACTIONS;
-                    (actions[base], actions[base + 1], actions[base + 2])
-                })
-                .collect();
-            env.step(&env_actions);
-        }
+        // Step all environments in parallel
+        self.envs
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, env)| {
+                let n = env.num_agents();
+                let env_actions: Vec<(f32, f32, f32)> = (0..n)
+                    .map(|j| {
+                        let base = (i * max_a + j) * NUM_ACTIONS;
+                        (actions[base], actions[base + 1], actions[base + 2])
+                    })
+                    .collect();
+                env.step(&env_actions);
+            });
 
         self.get_rewards()
     }
 
     // ------------------------------------------------------------------
-    // Observe — egocentric views
+    // Observe (parallel)
     // ------------------------------------------------------------------
 
-    /// Returns flat observation: [num_envs * max_agents * res * res * TOTAL_VIEW_CHANNELS].
-    /// Padded agent slots are all zeros.
     pub fn observe(&self) -> Vec<f32> {
-        let num_envs = self.envs.len();
         let max_a = self.max_agents;
         let res = self.view_res();
         let tc = TOTAL_VIEW_CHANNELS;
         let view_per_agent = res * res * tc;
+        let stride = max_a * view_per_agent;
 
-        let mut obs = vec![0.0f32; num_envs * max_a * view_per_agent];
+        // Each env writes into its own non-overlapping slice
+        let mut obs = vec![0.0f32; self.envs.len() * stride];
 
-        for (i, env) in self.envs.iter().enumerate() {
-            let views = env.get_views();
-            let na = env.num_agents();
-            for j in 0..na {
-                let src_start = j * view_per_agent;
-                let dst_start = (i * max_a + j) * view_per_agent;
-                obs[dst_start..dst_start + view_per_agent]
-                    .copy_from_slice(&views[src_start..src_start + view_per_agent]);
-            }
-        }
+        // Split into per-env chunks and fill in parallel
+        obs.par_chunks_mut(stride)
+            .zip(self.envs.par_iter())
+            .for_each(|(chunk, env)| {
+                let views = env.get_views();
+                let na = env.num_agents();
+                for j in 0..na {
+                    let src_start = j * view_per_agent;
+                    let dst_start = j * view_per_agent;
+                    chunk[dst_start..dst_start + view_per_agent]
+                        .copy_from_slice(&views[src_start..src_start + view_per_agent]);
+                }
+                // Padded slots stay zero (already initialized)
+            });
 
         obs
     }
@@ -99,25 +105,24 @@ impl BatchedEnvironment {
     // Alive mask
     // ------------------------------------------------------------------
 
-    /// True if every real agent in every environment is dead.
     pub fn all_dead(&self) -> bool {
         self.envs
-            .iter()
+            .par_iter()
             .all(|env| env.agents.iter().all(|a| !a.alive))
     }
 
-    /// Flat [num_envs * max_agents] — 1.0 alive, 0.0 dead/padded.
     pub fn get_alive_mask(&self) -> Vec<f32> {
-        let num_envs = self.envs.len();
         let max_a = self.max_agents;
-        let mut mask = vec![0.0f32; num_envs * max_a];
+        let mut mask = vec![0.0f32; self.envs.len() * max_a];
 
-        for (i, env) in self.envs.iter().enumerate() {
-            let am = env.get_alive_mask();
-            for (j, &v) in am.iter().enumerate() {
-                mask[i * max_a + j] = v;
-            }
-        }
+        mask.par_chunks_mut(max_a)
+            .zip(self.envs.par_iter())
+            .for_each(|(chunk, env)| {
+                let am = env.get_alive_mask();
+                for (j, &v) in am.iter().enumerate() {
+                    chunk[j] = v;
+                }
+            });
 
         mask
     }
@@ -127,16 +132,18 @@ impl BatchedEnvironment {
     // ------------------------------------------------------------------
 
     pub fn get_rewards(&self) -> Vec<f32> {
-        let num_envs = self.envs.len();
         let max_a = self.max_agents;
-        let mut rewards = vec![0.0f32; num_envs * max_a];
+        let mut rewards = vec![0.0f32; self.envs.len() * max_a];
 
-        for (i, env) in self.envs.iter().enumerate() {
-            let r = env.get_rewards();
-            for (j, &val) in r.iter().enumerate() {
-                rewards[i * max_a + j] = val;
-            }
-        }
+        rewards
+            .par_chunks_mut(max_a)
+            .zip(self.envs.par_iter())
+            .for_each(|(chunk, env)| {
+                let r = env.get_rewards();
+                for (j, &val) in r.iter().enumerate() {
+                    chunk[j] = val;
+                }
+            });
 
         rewards
     }
@@ -182,7 +189,6 @@ mod tests {
         let be = BatchedEnvironment::new(vec![3, 5, 2], test_config(), 42);
         let obs = be.observe();
         let res = be.view_res();
-        // 3 envs * 5 max_agents * 8 * 8 * 16
         assert_eq!(obs.len(), 3 * 5 * res * res * TOTAL_VIEW_CHANNELS);
     }
 
@@ -197,11 +203,9 @@ mod tests {
     fn padding_mask() {
         let be = BatchedEnvironment::new(vec![1, 3], test_config(), 42);
         let mask = be.get_alive_mask();
-        // env0: 1 agent alive, 2 padded
         assert!((mask[0] - 1.0).abs() < 1e-6);
         assert!((mask[1]).abs() < 1e-6);
         assert!((mask[2]).abs() < 1e-6);
-        // env1: 3 agents alive
         assert!((mask[3] - 1.0).abs() < 1e-6);
         assert!((mask[4] - 1.0).abs() < 1e-6);
         assert!((mask[5] - 1.0).abs() < 1e-6);
@@ -219,8 +223,8 @@ mod tests {
     fn envs_are_independent() {
         let mut be = BatchedEnvironment::new(vec![1, 1], test_config(), 42);
         let mut actions = vec![0.0f32; 2 * 1 * NUM_ACTIONS];
-        actions[0] = 5.0; // env0 agent0 ax
-        actions[3] = -5.0; // env1 agent0 ax
+        actions[0] = 5.0;  // env0 ax
+        actions[3] = -5.0; // env1 ax
 
         let p0 = be.envs[0].agents[0].pos;
         let p1 = be.envs[1].agents[0].pos;
@@ -245,5 +249,21 @@ mod tests {
                 assert!((agent.energy - 10.0).abs() < 1e-6);
             }
         }
+    }
+
+    #[test]
+    fn all_dead_detection() {
+        let mut cfg = test_config();
+        cfg.dead_steps_threshold = 1;
+        let mut be = BatchedEnvironment::new(vec![1, 1], cfg, 42);
+        assert!(!be.all_dead());
+
+        // Kill all agents
+        for env in &mut be.envs {
+            for agent in &mut env.agents {
+                agent.alive = false;
+            }
+        }
+        assert!(be.all_dead());
     }
 }
