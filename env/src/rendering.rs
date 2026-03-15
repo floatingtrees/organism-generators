@@ -64,6 +64,13 @@ pub fn render_environment(
 
         // Draw a small marker in the centre so agents are distinguishable from food
         draw_circle(&mut buf, img_w, img_h, cx, cy, (circle_r * 0.35).max(1.0), [255, 255, 255]);
+
+        // Draw dashed view-size circle
+        if agent.alive && agent.view_size > 0.0 {
+            let view_r = agent.view_size * pixels_per_unit;
+            let dash_color = [color[0] / 2, color[1] / 2, color[2] / 2]; // dimmed agent color
+            draw_dashed_ring(&mut buf, img_w, img_h, cx, cy, view_r, dash_color, 6.0, 4.0);
+        }
     }
 
     // Draw border
@@ -126,6 +133,56 @@ fn draw_circle(
             let dy = y as f32 - cy;
             if dx * dx + dy * dy <= r * r {
                 set_pixel(buf, img_w, x, y, color);
+            }
+        }
+    }
+}
+
+/// Draw a dashed ring (circle outline with gaps).
+/// `dash_len` and `gap_len` are in pixels along the circumference.
+fn draw_dashed_ring(
+    buf: &mut [u8],
+    img_w: usize,
+    img_h: usize,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    color: [u8; 3],
+    dash_len: f32,
+    gap_len: f32,
+) {
+    if radius < 1.0 {
+        return;
+    }
+    let circumference = 2.0 * std::f32::consts::PI * radius;
+    let total_pattern = dash_len + gap_len;
+    // Walk around the circle in 1-pixel steps
+    let num_steps = (circumference * 2.0).ceil() as usize;
+    let thickness = 1.5f32;
+
+    for i in 0..num_steps {
+        let arc_pos = (i as f32 / num_steps as f32) * circumference;
+        // Skip gap portions
+        if (arc_pos % total_pattern) >= dash_len {
+            continue;
+        }
+        let angle = (i as f32 / num_steps as f32) * 2.0 * std::f32::consts::PI;
+        let px = cx + radius * angle.cos();
+        let py = cy + radius * angle.sin();
+
+        // Draw a small dot for thickness
+        let x_min = ((px - thickness).floor() as i32).max(0) as usize;
+        let x_max = ((px + thickness).ceil() as i32).min(img_w as i32 - 1).max(0) as usize;
+        let y_min = ((py - thickness).floor() as i32).max(0) as usize;
+        let y_max = ((py + thickness).ceil() as i32).min(img_h as i32 - 1).max(0) as usize;
+
+        for y in y_min..=y_max {
+            for x in x_min..=x_max {
+                let dx = x as f32 - px;
+                let dy = y as f32 - py;
+                if dx * dx + dy * dy <= thickness * thickness {
+                    set_pixel(buf, img_w, x, y, color);
+                }
             }
         }
     }
