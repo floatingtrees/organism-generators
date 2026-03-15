@@ -386,16 +386,19 @@ impl Environment {
     // Observation / reward helpers
     // ------------------------------------------------------------------
 
-    /// Returns (x, y) for every agent (alive or dead).
-    pub fn get_agent_features(&self) -> Vec<[f32; 2]> {
-        self.agents.iter().map(|a| [a.pos.x, a.pos.y]).collect()
-    }
-
-    /// 1.0 for alive agents, 0.0 for dead/non-existent.
-    pub fn get_alive_mask(&self) -> Vec<f32> {
+    /// Returns [x, y, vx, vy, alive] for every agent.
+    pub fn get_agent_features(&self) -> Vec<[f32; 5]> {
         self.agents
             .iter()
-            .map(|a| if a.alive { 1.0 } else { 0.0 })
+            .map(|a| {
+                [
+                    a.pos.x,
+                    a.pos.y,
+                    a.vel.x,
+                    a.vel.y,
+                    if a.alive { 1.0 } else { 0.0 },
+                ]
+            })
             .collect()
     }
 

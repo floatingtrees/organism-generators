@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
 import organism_env
+from conftest import ALIVE, NUM_FEATURES
 
 
 class TestInitialize:
@@ -60,7 +61,6 @@ class TestInitialize:
             "food_spawn_rate": 1.0,
             "num_copies": 1,
         }
-        # Should not raise — dt defaults to 0.5
         env = organism_env.EvolutionEnv.initialize(config)
         assert env.num_envs == 1
 
@@ -83,16 +83,20 @@ class TestInitialize:
 
     def test_agents_start_alive(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
-        _, mask = env.observe()
-        # All agents should be alive initially
-        assert np.all(mask == 1.0)
+        obs = env.observe()
+        assert np.all(obs[..., ALIVE] == 1.0)
 
     def test_agents_within_bounds(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
-        obs, _ = env.observe()
+        obs = env.observe()
         h = small_config["height"]
         w = small_config["width"]
         assert np.all(obs[..., 0] >= 0.0)
         assert np.all(obs[..., 0] <= w)
         assert np.all(obs[..., 1] >= 0.0)
         assert np.all(obs[..., 1] <= h)
+
+    def test_observe_has_5_features(self, small_config):
+        env = organism_env.EvolutionEnv.initialize(small_config)
+        obs = env.observe()
+        assert obs.shape == (2, 3, NUM_FEATURES)

@@ -47,6 +47,11 @@ def deterministic_config():
     }
 
 
+# Feature indices in observe() output
+X, Y, VX, VY, ALIVE = 0, 1, 2, 3, 4
+NUM_FEATURES = 5
+
+
 def zero_actions(env):
     """Create a zero-action tensor matching the environment shape."""
     return np.zeros((env.num_envs, env.max_agents, 2), dtype=np.float32)

@@ -9,8 +9,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::batched_env::BatchedEnvironment;
-use crate::rendering::render_environment;
+use crate::rendering::save_environment_png;
 use crate::types::*;
+
+use std::path::Path;
 
 #[pyclass]
 struct EvolutionEnv {
@@ -149,44 +151,39 @@ impl EvolutionEnv {
         Ok(arr.into_pyarray(py))
     }
 
-    /// Get observations and alive mask.
+    /// Get observations for all environments.
     ///
     /// Returns:
-    ///     (features, mask)
-    ///     features: numpy (num_envs, max_agents, 2) — [x, y] per agent
-    ///     mask:     numpy (num_envs, max_agents)    — 1.0 alive, 0.0 dead/pad
+    ///     numpy (num_envs, max_agents, 5) — features: [x, y, vx, vy, alive]
+    ///     Padded agent slots are all zeros (alive=0).
     fn observe<'py>(
         &self,
         py: Python<'py>,
-    ) -> PyResult<(Bound<'py, PyArrayDyn<f32>>, Bound<'py, PyArrayDyn<f32>>)> {
+    ) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let ne = self.inner.num_envs();
         let ma = self.inner.max_agents;
+        let nf = BatchedEnvironment::NUM_FEATURES;
 
-        let (features, mask) = self.inner.observe();
+        let features = self.inner.observe();
 
-        let f_arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma, 2]), features)
+        let arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma, nf]), features)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-        let m_arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma]), mask)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
-        Ok((f_arr.into_pyarray(py), m_arr.into_pyarray(py)))
+        Ok(arr.into_pyarray(py))
     }
 
-    /// Render a single environment as an RGB image.
+    /// Render a single environment and save as a PNG file.
     ///
     /// Args:
+    ///     filepath: path to save the PNG image
     ///     env_index: which environment to render (default 0)
     ///     pixels_per_unit: rendering resolution (default 20.0)
-    ///
-    /// Returns:
-    ///     numpy uint8 array of shape (H, W, 3)
-    #[pyo3(signature = (env_index=None, pixels_per_unit=None))]
-    fn render<'py>(
+    #[pyo3(signature = (filepath, env_index=None, pixels_per_unit=None))]
+    fn render(
         &self,
-        py: Python<'py>,
+        filepath: &str,
         env_index: Option<usize>,
         pixels_per_unit: Option<f32>,
-    ) -> PyResult<Bound<'py, PyArrayDyn<u8>>> {
+    ) -> PyResult<()> {
         let idx = env_index.unwrap_or(0);
         let ppu = pixels_per_unit.unwrap_or(20.0);
 
@@ -198,11 +195,8 @@ impl EvolutionEnv {
             )));
         }
 
-        let (buf, w, h) = render_environment(&self.inner.envs[idx], ppu);
-
-        let arr = ArrayD::from_shape_vec(IxDyn(&[h, w, 3]), buf)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-        Ok(arr.into_pyarray(py))
+        save_environment_png(&self.inner.envs[idx], ppu, Path::new(filepath))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e))
     }
 
     /// Number of parallel environments.

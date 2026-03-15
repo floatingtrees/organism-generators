@@ -1,6 +1,8 @@
-/// Rendering an environment to an RGB image buffer.
+/// Rendering an environment to an RGB image buffer and saving as PNG.
 
 use crate::environment::Environment;
+use image::{ImageBuffer, Rgb};
+use std::path::Path;
 
 /// Render the environment to a flat RGB buffer (HWC layout).
 ///
@@ -75,6 +77,19 @@ pub fn render_environment(
     }
 
     (buf, img_w, img_h)
+}
+
+/// Render the environment and save as a PNG file.
+pub fn save_environment_png(
+    env: &Environment,
+    pixels_per_unit: f32,
+    path: &Path,
+) -> Result<(), String> {
+    let (buf, w, h) = render_environment(env, pixels_per_unit);
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_raw(w as u32, h as u32, buf)
+            .ok_or_else(|| "failed to create image buffer".to_string())?;
+    img.save(path).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -67,29 +67,29 @@ impl BatchedEnvironment {
     // Observe
     // ------------------------------------------------------------------
 
-    /// Returns `(features, mask)`.
-    /// - `features`: flat `[num_envs * max_agents * 2]` (x, y per agent)
-    /// - `mask`: flat `[num_envs * max_agents]` (1.0 alive, 0.0 dead/padded)
-    pub fn observe(&self) -> (Vec<f32>, Vec<f32>) {
+    pub const NUM_FEATURES: usize = 5; // x, y, vx, vy, alive
+
+    /// Returns flat `[num_envs * max_agents * NUM_FEATURES]`.
+    /// Features per agent: [x, y, vx, vy, alive].
+    /// Padded agent slots are all zeros (alive=0).
+    pub fn observe(&self) -> Vec<f32> {
         let num_envs = self.envs.len();
         let max_a = self.max_agents;
-        let num_features = 2;
+        let nf = Self::NUM_FEATURES;
 
-        let mut features = vec![0.0f32; num_envs * max_a * num_features];
-        let mut mask = vec![0.0f32; num_envs * max_a];
+        let mut features = vec![0.0f32; num_envs * max_a * nf];
 
         for (i, env) in self.envs.iter().enumerate() {
             let af = env.get_agent_features();
-            let am = env.get_alive_mask();
             for (j, feats) in af.iter().enumerate() {
-                let base = (i * max_a + j) * num_features;
-                features[base] = feats[0];
-                features[base + 1] = feats[1];
-                mask[i * max_a + j] = am[j];
+                let base = (i * max_a + j) * nf;
+                for (k, &v) in feats.iter().enumerate() {
+                    features[base + k] = v;
+                }
             }
         }
 
-        (features, mask)
+        features
     }
 
     // ------------------------------------------------------------------
@@ -150,35 +150,36 @@ mod tests {
     #[test]
     fn observe_shapes() {
         let be = BatchedEnvironment::new(vec![3, 5, 2], test_config(), 42);
-        let (features, mask) = be.observe();
-        // features: 3 envs * 5 max_agents * 2 features
-        assert_eq!(features.len(), 3 * 5 * 2);
-        // mask: 3 envs * 5 max_agents
-        assert_eq!(mask.len(), 3 * 5);
+        let features = be.observe();
+        // features: 3 envs * 5 max_agents * 5 features
+        assert_eq!(features.len(), 3 * 5 * 5);
     }
 
     #[test]
-    fn padding_is_zero() {
+    fn observe_alive_feature() {
         let be = BatchedEnvironment::new(vec![2], test_config(), 42);
-        let (_features, mask) = be.observe();
-        // Only 2 agents, max=2, so all should be valid
-        assert_eq!(mask.len(), 2);
-        assert!((mask[0] - 1.0).abs() < 1e-6);
-        assert!((mask[1] - 1.0).abs() < 1e-6);
+        let features = be.observe();
+        let nf = BatchedEnvironment::NUM_FEATURES;
+        // Agent 0 alive feature (index 4)
+        assert!((features[0 * nf + 4] - 1.0).abs() < 1e-6);
+        // Agent 1 alive feature
+        assert!((features[1 * nf + 4] - 1.0).abs() < 1e-6);
     }
 
     #[test]
-    fn padding_mask_for_variable_envs() {
+    fn padding_for_variable_envs() {
         let be = BatchedEnvironment::new(vec![1, 3], test_config(), 42);
-        let (_, mask) = be.observe();
-        // env0 has 1 agent, max=3 → mask = [1, 0, 0, ...]
-        assert!((mask[0] - 1.0).abs() < 1e-6);
-        assert!((mask[1] - 0.0).abs() < 1e-6);
-        assert!((mask[2] - 0.0).abs() < 1e-6);
-        // env1 has 3 agents → mask = [1, 1, 1]
-        assert!((mask[3] - 1.0).abs() < 1e-6);
-        assert!((mask[4] - 1.0).abs() < 1e-6);
-        assert!((mask[5] - 1.0).abs() < 1e-6);
+        let features = be.observe();
+        let nf = BatchedEnvironment::NUM_FEATURES;
+        let max_a = be.max_agents; // 3
+        // env0 has 1 agent → slot 0 alive=1, slots 1,2 alive=0
+        assert!((features[(0 * max_a + 0) * nf + 4] - 1.0).abs() < 1e-6);
+        assert!((features[(0 * max_a + 1) * nf + 4] - 0.0).abs() < 1e-6);
+        assert!((features[(0 * max_a + 2) * nf + 4] - 0.0).abs() < 1e-6);
+        // env1 has 3 agents → all alive=1
+        assert!((features[(1 * max_a + 0) * nf + 4] - 1.0).abs() < 1e-6);
+        assert!((features[(1 * max_a + 1) * nf + 4] - 1.0).abs() < 1e-6);
+        assert!((features[(1 * max_a + 2) * nf + 4] - 1.0).abs() < 1e-6);
     }
 
     #[test]
