@@ -6,6 +6,7 @@ Usage:
 """
 
 import argparse
+import math
 import time
 from dataclasses import dataclass
 
@@ -39,7 +40,7 @@ class PPOConfig:
     energy_loss: float = 0.02
     num_obstacles: int = 3
     food_cap: int = 100
-    vision_cost: float = 0.05
+    vision_cost: float = 0.01
     initial_view_size: float = 0.0
     reset_interval: int = 1024
 
@@ -349,8 +350,8 @@ def train(cfg: PPOConfig):
 
         if cfg.anneal_lr:
             elapsed = time.time() - start_time
-            frac = 1.0 - elapsed / cfg.train_time
-            optimizer.param_groups[0]["lr"] = cfg.lr * max(frac, 0.0)
+            frac = elapsed / cfg.train_time
+            optimizer.param_groups[0]["lr"] = cfg.lr * 0.5 * (1.0 + math.cos(math.pi * frac))
 
         # --- Collect rollout ---
         rollout_ep_returns = []
