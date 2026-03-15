@@ -148,6 +148,7 @@ pub struct EnvironmentConfig {
     pub dt: f32,
     pub food_spawn_rate: f32,
     pub energy_loss_wall: f32,
+    pub wall_velocity_damping: f32, // fraction of velocity retained on wall bounce (0.5 = lose 50%)
     pub object_radius: f32,
     pub num_initial_obstacles: usize,
     pub obstacle_weight: f32,
@@ -179,6 +180,7 @@ impl Default for EnvironmentConfig {
             dt,
             food_spawn_rate: 1.0,
             energy_loss_wall: 0.1,
+            wall_velocity_damping: 1.0, // no damping by default
             object_radius: 0.1,
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,

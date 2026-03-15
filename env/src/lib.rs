@@ -55,6 +55,7 @@ impl EvolutionEnv {
         // --- optional with defaults ---
         let dt: f32 = extract_or(config, "dt", 0.5)?;
         let energy_loss: f32 = extract_or(config, "energy_loss", 0.1)?;
+        let wall_velocity_damping: f32 = extract_or(config, "wall_velocity_damping", 1.0)?;
         let object_radius: f32 = extract_or(config, "object_radius", 0.1)?;
         let num_obstacles: usize = extract_or(config, "num_obstacles", 0)?;
         let obstacle_weight: f32 = extract_or(config, "obstacle_weight", 5.0)?;
@@ -100,6 +101,7 @@ impl EvolutionEnv {
             dt,
             food_spawn_rate,
             energy_loss_wall: energy_loss,
+            wall_velocity_damping,
             object_radius,
             num_initial_obstacles: num_obstacles,
             obstacle_weight,

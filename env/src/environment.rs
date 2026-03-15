@@ -184,7 +184,7 @@ impl Environment {
                 if !agent.alive {
                     continue;
                 }
-                Self::bounce_agent_off_walls(agent, radius, w, h, loss);
+                Self::bounce_agent_off_walls(agent, radius, w, h, loss, self.config.wall_velocity_damping);
             }
         }
 
@@ -250,6 +250,7 @@ impl Environment {
         w: f32,
         h: f32,
         energy_loss_frac: f32,
+        velocity_damping: f32,
     ) {
         let mut bounced = false;
 
@@ -275,6 +276,8 @@ impl Environment {
 
         if bounced {
             agent.energy -= agent.energy.abs() * energy_loss_frac;
+            agent.vel.x *= velocity_damping;
+            agent.vel.y *= velocity_damping;
         }
     }
 
@@ -770,6 +773,7 @@ mod tests {
             dt: 0.1,
             food_spawn_rate: 0.0,
             energy_loss_wall: 0.1,
+            wall_velocity_damping: 1.0,
             object_radius: 0.1,
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,

@@ -231,6 +231,7 @@ mod tests {
             dt: 0.1,
             food_spawn_rate: 0.0,
             energy_loss_wall: 0.1,
+            wall_velocity_damping: 1.0,
             object_radius: 0.1,
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,

@@ -40,14 +40,15 @@ class PPOConfig:
     dt: float = 0.2
     energy_loss: float = 0.02
     num_obstacles: int = 3
-    obstacle_radius: float = 6.0
-    obstacle_weight: float = 100.0
+    obstacle_radius: float = 3.0
+    obstacle_weight: float = 50.0
+    wall_velocity_damping: float = 0.5
     food_cap: int = 200  # 75% reduction from 800
     vision_cost: float = 0.001
     initial_view_size: float = 3.0
     min_view_size: float = 2.0
     object_radius: float = 0.3
-    energy_decay_rate: float = 1.0
+    energy_decay_rate: float = 0.95
     reset_interval: int = 256
 
     # PPO
@@ -258,6 +259,7 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
         "num_copies": cfg.num_envs,
         "dt": cfg.dt,
         "energy_loss": cfg.energy_loss,
+        "wall_velocity_damping": cfg.wall_velocity_damping,
         "object_radius": cfg.object_radius,
         "num_obstacles": cfg.num_obstacles,
         "obstacle_radius": cfg.obstacle_radius,
@@ -331,6 +333,7 @@ def inference_loop(
         "num_copies": 1,
         "dt": video_dt,
         "energy_loss": cfg.energy_loss,
+        "wall_velocity_damping": cfg.wall_velocity_damping,
         "object_radius": cfg.object_radius,
         "num_obstacles": cfg.num_obstacles,
         "obstacle_radius": cfg.obstacle_radius,
