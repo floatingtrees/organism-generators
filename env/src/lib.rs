@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::batched_env::BatchedEnvironment;
-use crate::environment::{NUM_ACTIONS, TOTAL_VIEW_CHANNELS};
+use crate::environment::{NUM_ACTIONS, NUM_SCALAR_FEATURES, TOTAL_VIEW_CHANNELS};
 use crate::rendering::{render_environment, save_environment_png};
 use crate::types::*;
 
@@ -86,6 +86,9 @@ impl EvolutionEnv {
             }
             if let Some(v) = rd.get_item("agent_collision")? {
                 rules.agent_collision = v.extract()?;
+            }
+            if let Some(v) = rd.get_item("obstacle_obstacle_collision")? {
+                rules.obstacle_obstacle_collision = v.extract()?;
             }
         }
 
@@ -172,6 +175,17 @@ impl EvolutionEnv {
         let mask = self.inner.get_alive_mask();
 
         let arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma]), mask)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(arr.into_pyarray(py))
+    }
+
+    /// Returns agent scalar states: (num_envs, max_agents, 4) — [energy, vx, vy, view_size].
+    fn agent_states<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
+        let ne = self.inner.num_envs();
+        let ma = self.inner.max_agents;
+        let ns = NUM_SCALAR_FEATURES;
+        let data = self.inner.get_agent_states();
+        let arr = ArrayD::from_shape_vec(IxDyn(&[ne, ma, ns]), data)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         Ok(arr.into_pyarray(py))
     }

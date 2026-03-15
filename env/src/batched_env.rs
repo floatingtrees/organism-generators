@@ -1,6 +1,6 @@
 /// Batched wrapper that runs multiple environments in parallel via rayon.
 
-use crate::environment::{Environment, NUM_ACTIONS, TOTAL_VIEW_CHANNELS};
+use crate::environment::{Environment, NUM_ACTIONS, NUM_SCALAR_FEATURES, TOTAL_VIEW_CHANNELS};
 use crate::types::EnvironmentConfig;
 use rayon::prelude::*;
 
@@ -125,6 +125,33 @@ impl BatchedEnvironment {
             });
 
         mask
+    }
+
+    // ------------------------------------------------------------------
+    // Agent states (scalar side channel)
+    // ------------------------------------------------------------------
+
+    /// Flat [num_envs * max_agents * NUM_SCALAR_FEATURES].
+    pub fn get_agent_states(&self) -> Vec<f32> {
+        let max_a = self.max_agents;
+        let ns = NUM_SCALAR_FEATURES;
+        let stride = max_a * ns;
+        let mut states = vec![0.0f32; self.envs.len() * stride];
+
+        states
+            .par_chunks_mut(stride)
+            .zip(self.envs.par_iter())
+            .for_each(|(chunk, env)| {
+                let s = env.get_agent_states();
+                let na = env.num_agents();
+                for j in 0..na {
+                    let src = j * ns;
+                    let dst = j * ns;
+                    chunk[dst..dst + ns].copy_from_slice(&s[src..src + ns]);
+                }
+            });
+
+        states
     }
 
     // ------------------------------------------------------------------

@@ -8,6 +8,8 @@ use std::collections::VecDeque;
 
 /// Observation channels per frame: food, alive_agent, dead_agent, obstacle.
 pub const NUM_VIEW_CHANNELS: usize = 4;
+/// Scalar self-state features: energy, vx, vy, view_size.
+pub const NUM_SCALAR_FEATURES: usize = 4;
 /// Number of previous frames stacked with the current frame.
 pub const NUM_HISTORY_FRAMES: usize = 3;
 /// Total channels in an observation: 4 channels × (1 current + 3 history).
@@ -33,17 +35,27 @@ pub struct Environment {
 impl Environment {
     pub fn new(num_agents: usize, config: EnvironmentConfig, seed: u64) -> Self {
         let mut rng = SmallRng::seed_from_u64(seed);
-        let radius = config.object_radius;
+        let mut placed: Vec<(Vec2, f32)> = Vec::new();
 
-        let agents = Self::place_agents(num_agents, &config, &mut rng);
+        // Place agents (non-overlapping)
+        let r = config.object_radius;
+        let ivs = config.initial_view_size;
+        let agents: Vec<Agent> = (0..num_agents)
+            .map(|id| {
+                let pos = find_non_overlapping(&placed, r, config.width, config.height, &mut rng);
+                placed.push((pos, r));
+                Agent::new(id, pos, ivs)
+            })
+            .collect();
 
+        // Place obstacles (non-overlapping with agents and each other)
+        let obs_r = config.obstacle_radius;
         let mut obstacles = Vec::with_capacity(config.num_initial_obstacles);
         for _ in 0..config.num_initial_obstacles {
-            let obs_r = config.obstacle_radius;
-            let x = rng.gen_range(obs_r..config.width - obs_r);
-            let y = rng.gen_range(obs_r..config.height - obs_r);
+            let pos = find_non_overlapping(&placed, obs_r, config.width, config.height, &mut rng);
+            placed.push((pos, obs_r));
             obstacles.push(Obstacle {
-                pos: Vec2::new(x, y),
+                pos,
                 vel: Vec2::zero(),
                 weight: config.obstacle_weight,
                 radius: obs_r,
@@ -74,18 +86,6 @@ impl Environment {
         env
     }
 
-    fn place_agents(n: usize, config: &EnvironmentConfig, rng: &mut SmallRng) -> Vec<Agent> {
-        let r = config.object_radius;
-        let ivs = config.initial_view_size;
-        (0..n)
-            .map(|id| {
-                let x = rng.gen_range(r..config.width - r);
-                let y = rng.gen_range(r..config.height - r);
-                Agent::new(id, Vec2::new(x, y), ivs)
-            })
-            .collect()
-    }
-
     // ------------------------------------------------------------------
     // Reset
     // ------------------------------------------------------------------
@@ -95,12 +95,13 @@ impl Environment {
         self.rng = SmallRng::seed_from_u64(self.seed);
         let r = self.config.object_radius;
         let ivs = self.config.initial_view_size;
+        let w = self.config.width;
+        let h = self.config.height;
+        let mut placed: Vec<(Vec2, f32)> = Vec::new();
 
         for agent in &mut self.agents {
-            agent.pos = Vec2::new(
-                self.rng.gen_range(r..self.config.width - r),
-                self.rng.gen_range(r..self.config.height - r),
-            );
+            agent.pos = find_non_overlapping(&placed, r, w, h, &mut self.rng);
+            placed.push((agent.pos, r));
             agent.vel = Vec2::zero();
             agent.energy = 10.0;
             agent.dead_steps = 0;
@@ -111,10 +112,9 @@ impl Environment {
         self.foods.clear();
 
         for obstacle in &mut self.obstacles {
-            obstacle.pos = Vec2::new(
-                self.rng.gen_range(r..self.config.width - r),
-                self.rng.gen_range(r..self.config.height - r),
-            );
+            let obs_r = obstacle.radius;
+            obstacle.pos = find_non_overlapping(&placed, obs_r, w, h, &mut self.rng);
+            placed.push((obstacle.pos, obs_r));
             obstacle.vel = Vec2::zero();
         }
 
@@ -186,12 +186,17 @@ impl Environment {
             }
         }
 
-        // 5. Obstacle collisions (elastic)
+        // 5. Obstacle-obstacle collisions
+        if self.config.interaction_rules.obstacle_obstacle_collision {
+            self.handle_obstacle_obstacle_collisions();
+        }
+
+        // 6. Agent-obstacle collisions (elastic)
         if self.config.interaction_rules.obstacle_collision {
             self.handle_obstacle_collisions(radius);
         }
 
-        // 6. Agent-agent collisions (elastic, optional)
+        // 7. Agent-agent collisions (elastic, optional)
         if self.config.interaction_rules.agent_collision {
             self.handle_agent_collisions(radius);
         }
@@ -282,7 +287,60 @@ impl Environment {
     }
 
     // ------------------------------------------------------------------
-    // Obstacle collisions (elastic) — spatial hash
+    // Obstacle-obstacle collisions (elastic) — spatial hash
+    // ------------------------------------------------------------------
+
+    fn handle_obstacle_obstacle_collisions(&mut self) {
+        let n = self.obstacles.len();
+        if n < 2 {
+            return;
+        }
+        let obs_positions: Vec<Vec2> = self.obstacles.iter().map(|o| o.pos).collect();
+        let obs_radii: Vec<f32> = self.obstacles.iter().map(|o| o.radius).collect();
+        self.spatial.build_with_radii(&obs_positions, &obs_radii);
+
+        for i in 0..n {
+            let nearby = self
+                .spatial
+                .query_nearby(self.obstacles[i].pos, self.obstacles[i].radius);
+            for j in nearby {
+                if j <= i {
+                    continue;
+                }
+                let collision_dist = self.obstacles[i].radius + self.obstacles[j].radius;
+                let dist = self.obstacles[i].pos.distance_to(&self.obstacles[j].pos);
+                if dist >= collision_dist || dist < 1e-8 {
+                    continue;
+                }
+                let normal = Vec2::new(
+                    (self.obstacles[i].pos.x - self.obstacles[j].pos.x) / dist,
+                    (self.obstacles[i].pos.y - self.obstacles[j].pos.y) / dist,
+                );
+                let rel_vel = self.obstacles[i].vel - self.obstacles[j].vel;
+                let vel_along_normal = rel_vel.dot(&normal);
+                if vel_along_normal > 0.0 {
+                    continue;
+                }
+                let mi = self.obstacles[i].weight;
+                let mj = self.obstacles[j].weight;
+                let total_mass = mi + mj;
+                let impulse = -2.0 * vel_along_normal / total_mass;
+                self.obstacles[i].vel.x += impulse * mj * normal.x;
+                self.obstacles[i].vel.y += impulse * mj * normal.y;
+                self.obstacles[j].vel.x -= impulse * mi * normal.x;
+                self.obstacles[j].vel.y -= impulse * mi * normal.y;
+
+                let overlap = collision_dist - dist;
+                self.obstacles[i].pos.x += normal.x * overlap * mj / total_mass;
+                self.obstacles[i].pos.y += normal.y * overlap * mj / total_mass;
+                self.obstacles[j].pos.x -= normal.x * overlap * mi / total_mass;
+                self.obstacles[j].pos.y -= normal.y * overlap * mi / total_mass;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Agent-obstacle collisions (elastic) — spatial hash
     // ------------------------------------------------------------------
 
     fn handle_obstacle_collisions(&mut self, agent_radius: f32) {
@@ -599,9 +657,51 @@ impl Environment {
         self.agents.iter().map(|a| a.energy).collect()
     }
 
+    /// Returns flat [num_agents * NUM_SCALAR_FEATURES]: energy, vx, vy, view_size.
+    /// Dead/padded agents get zeros.
+    pub fn get_agent_states(&self) -> Vec<f32> {
+        let mut states = Vec::with_capacity(self.agents.len() * NUM_SCALAR_FEATURES);
+        for a in &self.agents {
+            if a.alive {
+                states.extend_from_slice(&[a.energy, a.vel.x, a.vel.y, a.view_size]);
+            } else {
+                states.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+            }
+        }
+        states
+    }
+
     pub fn num_agents(&self) -> usize {
         self.agents.len()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Non-overlapping spawn helper
+// ---------------------------------------------------------------------------
+
+fn find_non_overlapping(
+    placed: &[(Vec2, f32)],
+    radius: f32,
+    width: f32,
+    height: f32,
+    rng: &mut SmallRng,
+) -> Vec2 {
+    for _ in 0..100 {
+        let x = rng.gen_range(radius..width - radius);
+        let y = rng.gen_range(radius..height - radius);
+        let pos = Vec2::new(x, y);
+        let overlaps = placed
+            .iter()
+            .any(|(p, r)| pos.distance_to(p) < radius + r);
+        if !overlaps {
+            return pos;
+        }
+    }
+    // Fallback after 100 attempts
+    let x = rng.gen_range(radius..width - radius);
+    let y = rng.gen_range(radius..height - radius);
+    Vec2::new(x, y)
 }
 
 // ---------------------------------------------------------------------------

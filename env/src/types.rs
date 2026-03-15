@@ -122,7 +122,7 @@ pub struct InteractionRules {
     pub food_collection: bool,
     pub obstacle_collision: bool,
     pub agent_collision: bool,
-    // Future rules can be added here without breaking existing configs.
+    pub obstacle_obstacle_collision: bool,
 }
 
 impl Default for InteractionRules {
@@ -132,6 +132,7 @@ impl Default for InteractionRules {
             food_collection: true,
             obstacle_collision: true,
             agent_collision: false,
+            obstacle_obstacle_collision: true,
         }
     }
 }

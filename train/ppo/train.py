@@ -21,6 +21,7 @@ import organism_env
 NUM_ACTIONS = 3  # (ax, ay, view_delta)
 VIEW_RES = 32
 TOTAL_CHANNELS = 16  # 4 object channels × 4 temporal frames
+NUM_SCALAR_FEATURES = 4  # energy, vx, vy, view_size
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ class PPOConfig:
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     render_every: int = 100
-    video_interval: float = 600.0  # save a video every N seconds
+    video_interval: float = 300.0  # save a video every N seconds
     large_run: bool = False
 
     @property
@@ -86,48 +87,48 @@ class ActorCritic(nn.Module):
     Critic: outputs scalar value.
     """
 
-    def __init__(self, in_channels: int = TOTAL_CHANNELS, act_dim: int = NUM_ACTIONS, large: bool = False):
+    def __init__(self, in_channels: int = TOTAL_CHANNELS, act_dim: int = NUM_ACTIONS,
+                 scalar_dim: int = NUM_SCALAR_FEATURES, large: bool = False):
         super().__init__()
 
         if large:
-            # ~1M params: wider CNN + larger FC
             self.cnn = nn.Sequential(
                 nn.Conv2d(in_channels, 64, 3, stride=1, padding=1),
                 nn.ReLU(),
-                nn.MaxPool2d(2),          # 32x32 → 16x16
+                nn.MaxPool2d(2),
                 nn.Conv2d(64, 128, 3, stride=1, padding=1),
                 nn.ReLU(),
-                nn.MaxPool2d(2),          # 16x16 → 8x8
+                nn.MaxPool2d(2),
                 nn.Conv2d(128, 128, 3, stride=1, padding=1),
                 nn.ReLU(),
                 nn.Conv2d(128, 128, 3, stride=1, padding=1),
                 nn.ReLU(),
-                nn.MaxPool2d(2),          # 8x8 → 4x4
-                nn.AdaptiveMaxPool2d(2),  # 4x4 → 2x2
+                nn.MaxPool2d(2),
+                nn.AdaptiveMaxPool2d(2),
                 nn.Flatten(),
             )
-            cnn_out = 128 * 2 * 2  # 512
+            cnn_out = 128 * 2 * 2
             fc_hidden = 576
         else:
-            # ~127K params
             self.cnn = nn.Sequential(
                 nn.Conv2d(in_channels, 32, 3, stride=1, padding=1),
                 nn.ReLU(),
-                nn.MaxPool2d(2),          # 32x32 → 16x16
+                nn.MaxPool2d(2),
                 nn.Conv2d(32, 64, 3, stride=1, padding=1),
                 nn.ReLU(),
-                nn.MaxPool2d(2),          # 16x16 → 8x8
+                nn.MaxPool2d(2),
                 nn.Conv2d(64, 64, 3, stride=1, padding=1),
                 nn.ReLU(),
-                nn.MaxPool2d(2),          # 8x8 → 4x4
-                nn.AdaptiveMaxPool2d(2),  # 4x4 → 2x2
+                nn.MaxPool2d(2),
+                nn.AdaptiveMaxPool2d(2),
                 nn.Flatten(),
             )
-            cnn_out = 64 * 2 * 2  # 256
+            cnn_out = 64 * 2 * 2
             fc_hidden = 256
 
+        # CNN output + scalar side channel → FC
         self.fc = nn.Sequential(
-            nn.Linear(cnn_out, fc_hidden),
+            nn.Linear(cnn_out + scalar_dim, fc_hidden),
             nn.ReLU(),
             nn.Linear(fc_hidden, fc_hidden),
             nn.ReLU(),
@@ -147,15 +148,18 @@ class ActorCritic(nn.Module):
         nn.init.orthogonal_(self.critic_head.weight, gain=1.0)
         nn.init.zeros_(self.critic_head.bias)
 
-    def _encode(self, obs: torch.Tensor) -> torch.Tensor:
+    def _encode(self, obs: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
         # obs: (B, H, W, C) → (B, C, H, W)
         x = obs.permute(0, 3, 1, 2).contiguous()
-        return self.fc(self.cnn(x))
+        cnn_out = self.cnn(x)
+        # Concatenate scalar side channel
+        combined = torch.cat([cnn_out, scalars], dim=-1)
+        return self.fc(combined)
 
     def get_action_and_value(
-        self, obs: torch.Tensor, action: torch.Tensor | None = None
+        self, obs: torch.Tensor, scalars: torch.Tensor, action: torch.Tensor | None = None
     ):
-        h = self._encode(obs)
+        h = self._encode(obs, scalars)
         mean = self.actor_mean(h)
         std = self.log_std.exp()
         dist = torch.distributions.Normal(mean, std)
@@ -181,6 +185,7 @@ class RolloutBuffer:
         dev = cfg.device
 
         self.obs = torch.zeros(T, n, VIEW_RES, VIEW_RES, TOTAL_CHANNELS, device=dev)
+        self.scalars = torch.zeros(T, n, NUM_SCALAR_FEATURES, device=dev)
         self.actions = torch.zeros(T, n, NUM_ACTIONS, device=dev)
         self.log_probs = torch.zeros(T, n, device=dev)
         self.rewards = torch.zeros(T, n, device=dev)
@@ -189,8 +194,9 @@ class RolloutBuffer:
         self.cfg = cfg
         self.step = 0
 
-    def insert(self, obs, actions, log_probs, rewards, values, alive):
+    def insert(self, obs, scalars, actions, log_probs, rewards, values, alive):
         self.obs[self.step] = obs
+        self.scalars[self.step] = scalars
         self.actions[self.step] = actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = rewards
@@ -219,6 +225,7 @@ class RolloutBuffer:
     def get_batches(self, num_minibatches: int):
         total = self.cfg.rollout_len * self.cfg.num_envs * self.cfg.num_agents
         obs = self.obs.reshape(total, VIEW_RES, VIEW_RES, TOTAL_CHANNELS)
+        scalars = self.scalars.reshape(total, NUM_SCALAR_FEATURES)
         actions = self.actions.reshape(total, -1)
         log_probs = self.log_probs.reshape(total)
         advantages = self.advantages.reshape(total)
@@ -230,7 +237,7 @@ class RolloutBuffer:
 
         for start in range(0, total, mb_size):
             idx = indices[start : start + mb_size]
-            yield obs[idx], actions[idx], log_probs[idx], advantages[idx], returns[idx], alive[idx]
+            yield obs[idx], scalars[idx], actions[idx], log_probs[idx], advantages[idx], returns[idx], alive[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -257,30 +264,31 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
     })
 
 
-def env_observe(env, device: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Returns (obs, alive_mask) as flat tensors on device.
-    obs: (num_envs * num_agents, H, W, C)
-    alive: (num_envs * num_agents,)
-    """
-    obs_np = env.observe()  # (num_envs, max_agents, H, W, C)
-    mask_np = env.alive_mask()  # (num_envs, max_agents)
+def env_observe(env, device: str):
+    """Returns (obs, scalars, alive) as flat tensors on device."""
+    obs_np = env.observe()       # (num_envs, max_agents, H, W, C)
+    states_np = env.agent_states()  # (num_envs, max_agents, 4)
+    mask_np = env.alive_mask()   # (num_envs, max_agents)
     n = obs_np.shape[0] * obs_np.shape[1]
     obs = torch.from_numpy(obs_np).reshape(n, VIEW_RES, VIEW_RES, TOTAL_CHANNELS).to(device)
+    scalars = torch.from_numpy(states_np).reshape(n, NUM_SCALAR_FEATURES).to(device)
     alive = torch.from_numpy(mask_np).reshape(n).to(device)
-    return obs, alive
+    return obs, scalars, alive
 
 
 def env_step(env, actions: torch.Tensor, num_envs: int, num_agents: int, device: str):
-    """Step env, return (energy, obs, alive)."""
+    """Step env, return (energy, obs, scalars, alive)."""
     act_np = actions.reshape(num_envs, num_agents, NUM_ACTIONS).cpu().numpy()
     energy_np = env.step(act_np)
     obs_np = env.observe()
+    states_np = env.agent_states()
     mask_np = env.alive_mask()
     n = num_envs * num_agents
     energy = torch.from_numpy(energy_np).reshape(n).to(device)
     obs = torch.from_numpy(obs_np).reshape(n, VIEW_RES, VIEW_RES, TOTAL_CHANNELS).to(device)
+    scalars = torch.from_numpy(states_np).reshape(n, NUM_SCALAR_FEATURES).to(device)
     alive = torch.from_numpy(mask_np).reshape(n).to(device)
-    return energy, obs, alive
+    return energy, obs, scalars, alive
 
 
 # ---------------------------------------------------------------------------
@@ -330,26 +338,21 @@ def inference_loop(
     device = cfg.device
 
     frames = []
-    obs_np = video_env.observe()
-    obs = torch.from_numpy(obs_np).reshape(-1, VIEW_RES, VIEW_RES, TOTAL_CHANNELS).to(device)
+    obs, scalars, _ = env_observe(video_env, device)
 
     with torch.no_grad():
         for step in range(num_steps):
             frame = video_env.render_array(env_index=0, pixels_per_unit=pixels_per_unit)
             frames.append(frame)
 
-            action, _, _, _ = model.get_action_and_value(obs)
+            action, _, _, _ = model.get_action_and_value(obs, scalars)
             act_np = action.reshape(1, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
             video_env.step(act_np)
-            obs = torch.from_numpy(video_env.observe()).reshape(
-                -1, VIEW_RES, VIEW_RES, TOTAL_CHANNELS
-            ).to(device)
+            obs, scalars, _ = env_observe(video_env, device)
 
             if (step + 1) % 1024 == 0:
                 video_env.reset()
-                obs = torch.from_numpy(video_env.observe()).reshape(
-                    -1, VIEW_RES, VIEW_RES, TOTAL_CHANNELS
-                ).to(device)
+                obs, scalars, _ = env_observe(video_env, device)
 
     frames_arr = np.stack(frames)
     iio.imwrite(output_path, frames_arr, fps=fps, codec="libx264")
@@ -380,7 +383,7 @@ def train(cfg: PPOConfig):
     from collections import deque
 
     n = cfg.num_envs * cfg.num_agents
-    obs, alive = env_observe(env, cfg.device)
+    obs, scalars, alive = env_observe(env, cfg.device)
     prev_energy = alive * 10.0
     ep_return_accum = torch.zeros(n, device=cfg.device)
     ep_length = 0  # steps since last reset
@@ -398,9 +401,9 @@ def train(cfg: PPOConfig):
     print(f"         training for {cfg.train_time:.0f}s wall-clock")
     print()
 
-    # --- Initial video (random policy) ---
+    # --- Initial video (random policy, short) ---
     print("Generating initial video (untrained policy)...")
-    inference_loop(model=agent, cfg=cfg, output_path="train/ppo/videos/initial_step0.mp4")
+    inference_loop(model=agent, cfg=cfg, output_path="train/ppo/videos/initial_step0.mp4", num_steps=2048)
 
     while (time.time() - start_time) < cfg.train_time:
         update += 1
@@ -420,17 +423,18 @@ def train(cfg: PPOConfig):
             ep_length += 1
 
             with torch.no_grad():
-                action, log_prob, _, value = agent.get_action_and_value(obs)
+                action, log_prob, _, value = agent.get_action_and_value(obs, scalars)
 
-            energy, next_obs, next_alive = env_step(
+            energy, next_obs, next_scalars, next_alive = env_step(
                 env, action, cfg.num_envs, cfg.num_agents, cfg.device
             )
             reward = (energy - prev_energy) * alive
             prev_energy = energy.clone()
 
-            buf.insert(obs, action, log_prob, reward, value, alive)
+            buf.insert(obs, scalars, action, log_prob, reward, value, alive)
             ep_return_accum += reward
             obs = next_obs
+            scalars = next_scalars
 
             # Track mean step reward for alive agents
             alive_count_step = (alive > 0).sum().item()
@@ -454,7 +458,7 @@ def train(cfg: PPOConfig):
                         recent_ep_returns.append(agent_returns.mean().item())
 
                 env.reset()
-                obs, alive = env_observe(env, cfg.device)
+                obs, scalars, alive = env_observe(env, cfg.device)
                 prev_energy = alive * 10.0
                 ep_return_accum = torch.zeros(n, device=cfg.device)
                 ep_length = 0
@@ -462,7 +466,7 @@ def train(cfg: PPOConfig):
 
         # --- Compute advantages ---
         with torch.no_grad():
-            _, _, _, next_value = agent.get_action_and_value(obs)
+            _, _, _, next_value = agent.get_action_and_value(obs, scalars)
         buf.compute_gae(next_value, alive)
 
         # --- PPO update ---
@@ -473,10 +477,10 @@ def train(cfg: PPOConfig):
         num_batches = 0
 
         for epoch in range(cfg.num_epochs):
-            for mb_obs, mb_act, mb_old_lp, mb_adv, mb_ret, mb_alive in buf.get_batches(
+            for mb_obs, mb_scalars, mb_act, mb_old_lp, mb_adv, mb_ret, mb_alive in buf.get_batches(
                 cfg.num_minibatches
             ):
-                _, new_lp, entropy, new_val = agent.get_action_and_value(mb_obs, mb_act)
+                _, new_lp, entropy, new_val = agent.get_action_and_value(mb_obs, mb_scalars, mb_act)
 
                 # Normalize advantages over alive agents
                 alive_mask = mb_alive > 0
@@ -525,8 +529,8 @@ def train(cfg: PPOConfig):
         mean_step_rew = rollout_reward_sum / max(rollout_reward_count, 1)
 
         with torch.no_grad():
-            cur_obs, cur_alive = env_observe(env, cfg.device)
-            _, _, _, cur_values = agent.get_action_and_value(cur_obs)
+            cur_obs, cur_scalars, cur_alive = env_observe(env, cfg.device)
+            _, _, _, cur_values = agent.get_action_and_value(cur_obs, cur_scalars)
             alive_mask = cur_alive > 0
             alive_count = int(alive_mask.sum().item())
             mean_value = cur_values[alive_mask].mean().item() if alive_count > 0 else 0.0
