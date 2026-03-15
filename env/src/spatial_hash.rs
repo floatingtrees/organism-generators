@@ -40,16 +40,42 @@ impl SpatialHash {
         (col.min(self.cols - 1), row.min(self.rows - 1))
     }
 
+    /// Insert a point-sized object into its containing cell.
     pub fn insert(&mut self, idx: usize, pos: Vec2) {
         let (col, row) = self.cell_coords(pos.x, pos.y);
         self.cells[row * self.cols + col].push(idx);
     }
 
-    /// Populate the hash from a slice of positions.
+    /// Insert an object with radius into ALL cells it overlaps.
+    pub fn insert_with_radius(&mut self, idx: usize, pos: Vec2, radius: f32) {
+        let min_col = ((pos.x - radius) * self.inv_cell_size).floor().max(0.0) as usize;
+        let max_col = ((pos.x + radius) * self.inv_cell_size).floor() as usize;
+        let max_col = max_col.min(self.cols - 1);
+        let min_row = ((pos.y - radius) * self.inv_cell_size).floor().max(0.0) as usize;
+        let max_row = ((pos.y + radius) * self.inv_cell_size).floor() as usize;
+        let max_row = max_row.min(self.rows - 1);
+
+        for row in min_row..=max_row {
+            let base = row * self.cols;
+            for col in min_col..=max_col {
+                self.cells[base + col].push(idx);
+            }
+        }
+    }
+
+    /// Populate the hash from a slice of positions (point-sized).
     pub fn build(&mut self, positions: &[Vec2]) {
         self.clear();
         for (i, pos) in positions.iter().enumerate() {
             self.insert(i, *pos);
+        }
+    }
+
+    /// Populate the hash from positions with per-object radii.
+    pub fn build_with_radii(&mut self, positions: &[Vec2], radii: &[f32]) {
+        self.clear();
+        for (i, (pos, &r)) in positions.iter().zip(radii.iter()).enumerate() {
+            self.insert_with_radius(i, *pos, r);
         }
     }
 
@@ -203,5 +229,33 @@ mod tests {
         let near = sh.query_nearby(Vec2::new(2.0, 1.0), 0.5);
         assert!(near.contains(&0));
         assert!(near.contains(&1));
+    }
+
+    #[test]
+    fn insert_with_radius_spans_cells() {
+        let mut sh = SpatialHash::new(10.0, 10.0, 2.0);
+        // Object at (5, 5) with radius 3 should span cells (1,1) through (3,3)
+        sh.insert_with_radius(0, Vec2::new(5.0, 5.0), 3.0);
+
+        // Should be findable from a distant point within the radius
+        let near = sh.query_nearby(Vec2::new(3.0, 3.0), 0.1);
+        assert!(near.contains(&0), "large object should be in cell near (3,3)");
+
+        // Should NOT be in a cell far away
+        let far = sh.query_nearby(Vec2::new(0.5, 0.5), 0.1);
+        assert!(!far.contains(&0), "large object should not be in cell near (0,0)");
+    }
+
+    #[test]
+    fn build_with_radii() {
+        let positions = vec![Vec2::new(5.0, 5.0), Vec2::new(1.0, 1.0)];
+        let radii = vec![3.0, 0.1];
+        let mut sh = SpatialHash::new(10.0, 10.0, 2.0);
+        sh.build_with_radii(&positions, &radii);
+
+        // Large object should be findable from (3, 3)
+        let near = sh.query_nearby(Vec2::new(3.0, 3.0), 0.1);
+        assert!(near.contains(&0));
+        assert!(!near.contains(&1));
     }
 }

@@ -39,7 +39,9 @@ class PPOConfig:
     dt: float = 0.2
     energy_loss: float = 0.02
     num_obstacles: int = 3
-    food_cap: int = 800
+    obstacle_radius: float = 6.0
+    obstacle_weight: float = 100.0
+    food_cap: int = 200  # 75% reduction from 800
     vision_cost: float = 0.01
     initial_view_size: float = 3.0
     object_radius: float = 0.3
@@ -247,6 +249,8 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
         "energy_loss": cfg.energy_loss,
         "object_radius": cfg.object_radius,
         "num_obstacles": cfg.num_obstacles,
+        "obstacle_radius": cfg.obstacle_radius,
+        "obstacle_weight": cfg.obstacle_weight,
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
         "initial_view_size": cfg.initial_view_size,
@@ -314,6 +318,8 @@ def inference_loop(
         "energy_loss": cfg.energy_loss,
         "object_radius": cfg.object_radius,
         "num_obstacles": cfg.num_obstacles,
+        "obstacle_radius": cfg.obstacle_radius,
+        "obstacle_weight": cfg.obstacle_weight,
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
         "initial_view_size": cfg.initial_view_size,

@@ -150,6 +150,7 @@ pub struct EnvironmentConfig {
     pub object_radius: f32,
     pub num_initial_obstacles: usize,
     pub obstacle_weight: f32,
+    pub obstacle_radius: f32,
     pub dead_steps_threshold: u32,
     pub food_cap: Option<usize>,
     pub vision_cost: f32,
@@ -178,6 +179,7 @@ impl Default for EnvironmentConfig {
             object_radius: 0.1,
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,
+            obstacle_radius: 0.1, // defaults to object_radius
             dead_steps_threshold: Self::dead_threshold_from_seconds(10.0, dt),
             food_cap: None,
             vision_cost: 0.1,

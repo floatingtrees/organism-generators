@@ -234,6 +234,7 @@ mod tests {
             object_radius: 0.1,
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,
+            obstacle_radius: 0.1,
             dead_steps_threshold: 100,
             food_cap: None,
             vision_cost: 0.0,

@@ -69,6 +69,7 @@ impl EvolutionEnv {
         let vision_cost: f32 = extract_or(config, "vision_cost", 0.1)?;
         let view_res: usize = extract_or(config, "view_res", 32)?;
         let initial_view_size: f32 = extract_or(config, "initial_view_size", 2.0)?;
+        let obstacle_radius: f32 = extract_or(config, "obstacle_radius", object_radius)?;
 
         // --- interaction rules ---
         let mut rules = InteractionRules::default();
@@ -97,6 +98,7 @@ impl EvolutionEnv {
             object_radius,
             num_initial_obstacles: num_obstacles,
             obstacle_weight,
+            obstacle_radius,
             dead_steps_threshold: EnvironmentConfig::dead_threshold_from_seconds(10.0, dt),
             food_cap,
             vision_cost,

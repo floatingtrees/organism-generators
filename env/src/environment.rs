@@ -39,13 +39,14 @@ impl Environment {
 
         let mut obstacles = Vec::with_capacity(config.num_initial_obstacles);
         for _ in 0..config.num_initial_obstacles {
-            let x = rng.gen_range(radius..config.width - radius);
-            let y = rng.gen_range(radius..config.height - radius);
+            let obs_r = config.obstacle_radius;
+            let x = rng.gen_range(obs_r..config.width - obs_r);
+            let y = rng.gen_range(obs_r..config.height - obs_r);
             obstacles.push(Obstacle {
                 pos: Vec2::new(x, y),
                 vel: Vec2::zero(),
                 weight: config.obstacle_weight,
-                radius,
+                radius: obs_r,
             });
         }
 
@@ -289,17 +290,17 @@ impl Environment {
             return;
         }
         let obs_positions: Vec<Vec2> = self.obstacles.iter().map(|o| o.pos).collect();
-        self.spatial.build(&obs_positions);
-        let max_obs_r = self.obstacles.iter().map(|o| o.radius).fold(0.0f32, f32::max);
-        let search_radius = agent_radius + max_obs_r;
+        let obs_radii: Vec<f32> = self.obstacles.iter().map(|o| o.radius).collect();
+        self.spatial.build_with_radii(&obs_positions, &obs_radii);
 
         for agent_idx in 0..self.agents.len() {
             if !self.agents[agent_idx].alive {
                 continue;
             }
+            // Only need agent_radius for query since obstacles are already in all their cells
             let nearby = self
                 .spatial
-                .query_nearby(self.agents[agent_idx].pos, search_radius);
+                .query_nearby(self.agents[agent_idx].pos, agent_radius);
             for obs_idx in nearby {
                 let collision_dist = agent_radius + self.obstacles[obs_idx].radius;
                 let dist = self.agents[agent_idx]
@@ -528,14 +529,14 @@ impl Environment {
             let obs_info: Vec<(Vec2, f32)> =
                 self.obstacles.iter().map(|o| (o.pos, o.radius)).collect();
             let obs_positions: Vec<Vec2> = obs_info.iter().map(|&(p, _)| p).collect();
-            self.spatial.build(&obs_positions);
+            let obs_radii: Vec<f32> = obs_info.iter().map(|&(_, r)| r).collect();
+            self.spatial.build_with_radii(&obs_positions, &obs_radii);
             for (ai, &(pos, vs, alive, _)) in agent_info.iter().enumerate() {
                 if !alive || vs <= 0.0 {
                     continue;
                 }
-                let max_obs_r = obs_info.iter().map(|&(_, r)| r).fold(0.0f32, f32::max);
                 let buf = &mut frame[ai * view_per_agent..(ai + 1) * view_per_agent];
-                for oi in self.spatial.query_nearby(pos, vs + max_obs_r) {
+                for oi in self.spatial.query_nearby(pos, vs) {
                     project_to_view(obs_info[oi].0, obs_info[oi].1, pos, vs, res, buf, nc, 3);
                 }
             }
@@ -662,6 +663,7 @@ mod tests {
             object_radius: 0.1,
             num_initial_obstacles: 0,
             obstacle_weight: 5.0,
+            obstacle_radius: 0.1,
             dead_steps_threshold: 100,
             food_cap: None,
             vision_cost: 0.0, // no vision cost in tests by default
