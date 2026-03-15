@@ -35,14 +35,15 @@ class PPOConfig:
     num_agents: int = 5
     env_width: float = 15.0
     env_height: float = 15.0
-    food_spawn_rate: float = 25.0
+    food_spawn_rate: float = 100.0
     dt: float = 0.2
     energy_loss: float = 0.02
     num_obstacles: int = 3
-    food_cap: int = 100
-    vision_cost: float = 0.05
-    initial_view_size: float = 0.1  # matches object_radius lower bound
-    reset_interval: int = 1024
+    food_cap: int = 200
+    vision_cost: float = 0.005
+    initial_view_size: float = 3.0
+    object_radius: float = 0.3
+    reset_interval: int = 256
 
     # PPO
     train_time: float = 600.0
@@ -51,7 +52,7 @@ class PPOConfig:
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
     vf_coef: float = 0.5
-    ent_coef: float = 0.01
+    ent_coef: float = 0.05
     max_grad_norm: float = 0.5
     num_epochs: int = 4
     num_minibatches: int = 4
@@ -132,7 +133,7 @@ class ActorCritic(nn.Module):
 
         self.actor_mean = nn.Linear(fc_hidden, act_dim)
         self.critic_head = nn.Linear(fc_hidden, 1)
-        self.log_std = nn.Parameter(torch.zeros(act_dim))
+        self.log_std = nn.Parameter(torch.full((act_dim,), -1.0))  # std=0.37, smaller initial actions
 
         # Init
         for m in self.modules():
@@ -244,6 +245,7 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
         "num_copies": cfg.num_envs,
         "dt": cfg.dt,
         "energy_loss": cfg.energy_loss,
+        "object_radius": cfg.object_radius,
         "num_obstacles": cfg.num_obstacles,
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
@@ -305,6 +307,7 @@ def inference_loop(
         "num_copies": 1,
         "dt": video_dt,
         "energy_loss": cfg.energy_loss,
+        "object_radius": cfg.object_radius,
         "num_obstacles": cfg.num_obstacles,
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
@@ -362,10 +365,14 @@ def train(cfg: PPOConfig):
     import os
     os.makedirs("train/ppo/videos", exist_ok=True)
 
+    from collections import deque
+
     n = cfg.num_envs * cfg.num_agents
     obs, alive = env_observe(env, cfg.device)
     prev_energy = alive * 10.0
     ep_return_accum = torch.zeros(n, device=cfg.device)
+    ep_length = 0  # steps since last reset
+    recent_ep_returns = deque(maxlen=100)  # persists across rollouts
     global_step = 0
     env_steps_since_reset = 0
     start_time = time.time()
@@ -388,11 +395,13 @@ def train(cfg: PPOConfig):
             optimizer.param_groups[0]["lr"] = cfg.lr * 0.5 * (1.0 + math.cos(math.pi * frac))
 
         # --- Collect rollout ---
-        rollout_ep_returns = []
+        rollout_reward_sum = 0.0
+        rollout_reward_count = 0
 
         for step in range(cfg.rollout_len):
             global_step += n
             env_steps_since_reset += 1
+            ep_length += 1
 
             with torch.no_grad():
                 action, log_prob, _, value = agent.get_action_and_value(obs)
@@ -406,21 +415,33 @@ def train(cfg: PPOConfig):
             buf.insert(obs, action, log_prob, reward, value, alive)
             ep_return_accum += reward
             obs = next_obs
+
+            # Track mean step reward for alive agents
+            alive_count_step = (alive > 0).sum().item()
+            if alive_count_step > 0:
+                rollout_reward_sum += reward[alive > 0].sum().item()
+                rollout_reward_count += alive_count_step
+
             alive = next_alive
 
             should_reset = env_steps_since_reset >= cfg.reset_interval or env.all_dead()
             if should_reset:
-                # Record episode returns
+                # Record per-env mean episode return
+                mask = torch.from_numpy(env.alive_mask()).reshape(cfg.num_envs, cfg.num_agents).to(cfg.device)
                 per_env = ep_return_accum.reshape(cfg.num_envs, cfg.num_agents)
+                # Use the alive mask from BEFORE reset to know which agents were real
+                initial_mask = torch.ones_like(mask)  # all agents were initialized alive
                 for e in range(cfg.num_envs):
-                    valid = per_env[e][per_env[e] != 0]
-                    if len(valid) > 0:
-                        rollout_ep_returns.append(valid.mean().item())
+                    n_agents = min(cfg.num_agents, per_env.shape[1])
+                    agent_returns = per_env[e, :n_agents]
+                    if n_agents > 0:
+                        recent_ep_returns.append(agent_returns.mean().item())
 
                 env.reset()
                 obs, alive = env_observe(env, cfg.device)
                 prev_energy = alive * 10.0
                 ep_return_accum = torch.zeros(n, device=cfg.device)
+                ep_length = 0
                 env_steps_since_reset = 0
 
         # --- Compute advantages ---
@@ -484,7 +505,8 @@ def train(cfg: PPOConfig):
         # --- Logging ---
         elapsed = time.time() - start_time
         sps = global_step / elapsed
-        mean_ep_return = np.mean(rollout_ep_returns) if rollout_ep_returns else float("nan")
+        mean_ep_return = np.mean(recent_ep_returns) if recent_ep_returns else float("nan")
+        mean_step_rew = rollout_reward_sum / max(rollout_reward_count, 1)
 
         with torch.no_grad():
             cur_obs, cur_alive = env_observe(env, cfg.device)
@@ -502,6 +524,7 @@ def train(cfg: PPOConfig):
                 f"step {global_step:>10,} | "
                 f"sps {sps:>8,.0f} | "
                 f"ep_ret {mean_ep_return:+7.2f} | "
+                f"r/step {mean_step_rew:+.4f} | "
                 f"V(s) {mean_value:+7.2f} | "
                 f"energy {mean_energy:+7.2f} | "
                 f"pg {total_pg_loss / num_batches:+.4f} | "
