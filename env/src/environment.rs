@@ -156,8 +156,8 @@ impl Environment {
             // View size update
             agent.view_size = (agent.view_size + vd * dt).clamp(radius, max_vs);
 
-            // Vision cost: vision_cost * view_size per second
-            agent.energy -= self.config.vision_cost * agent.view_size * dt;
+            // Vision cost: vision_cost * view_size^2 per second (quadratic)
+            agent.energy -= self.config.vision_cost * agent.view_size * agent.view_size * dt;
         }
 
         // 2. Update obstacle positions
@@ -748,8 +748,8 @@ mod tests {
         env.step(&[(0.0, 0.0, 0.0)]);
         let e1 = env.agents[0].energy;
 
-        // vision_cost * view_size * dt = 1.0 * 2.0 * 0.1 = 0.2
-        assert!((e0 - e1 - 0.2).abs() < 1e-5);
+        // vision_cost * view_size^2 * dt = 1.0 * 2.0^2 * 0.1 = 0.4
+        assert!((e0 - e1 - 0.4).abs() < 1e-5);
     }
 
     #[test]

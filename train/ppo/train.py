@@ -32,7 +32,7 @@ TOTAL_CHANNELS = 16  # 4 object channels × 4 temporal frames
 class PPOConfig:
     # Environment
     num_envs: int = 32
-    num_agents: int = 5
+    num_agents: int = 10
     env_width: float = 15.0
     env_height: float = 15.0
     food_spawn_rate: float = 100.0
@@ -40,7 +40,7 @@ class PPOConfig:
     energy_loss: float = 0.02
     num_obstacles: int = 3
     food_cap: int = 200
-    vision_cost: float = 0.005
+    vision_cost: float = 0.01
     initial_view_size: float = 3.0
     object_radius: float = 0.3
     reset_interval: int = 256
@@ -289,11 +289,12 @@ def inference_loop(
     cfg: PPOConfig,
     output_path: str = "train/ppo/final.mp4",
     video_dt: float = 0.04,
-    num_steps: int = 2048,
+    num_steps: int = 8192,
     pixels_per_unit: float = 40.0,
     seed: int = 9999,
+    speed_multiplier: float = 3.0,  # 3:1 = 3 game seconds per 1 real second
 ):
-    fps = 1.0 / video_dt
+    fps = speed_multiplier / video_dt
 
     raw_px = int(cfg.env_width * pixels_per_unit)
     if raw_px % 16 != 0:
@@ -343,7 +344,8 @@ def inference_loop(
     frames_arr = np.stack(frames)
     iio.imwrite(output_path, frames_arr, fps=fps, codec="libx264")
     duration = num_steps * video_dt
-    print(f"Video saved: {output_path} ({len(frames)} frames, {duration:.1f}s sim time, {fps:.0f} fps)")
+    video_duration = len(frames) / fps
+    print(f"Video saved: {output_path} ({len(frames)} frames, {duration:.1f}s sim, {video_duration:.1f}s video, {speed_multiplier:.0f}x speed)")
 
 
 # ---------------------------------------------------------------------------
