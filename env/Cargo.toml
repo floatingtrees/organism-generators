@@ -1,0 +1,17 @@
+[package]
+name = "organism_env"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "organism_env"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = "0.24"
+numpy = "0.24"
+ndarray = "0.16"
+rand = { version = "0.8", features = ["small_rng"] }
+
+[features]
+extension-module = ["pyo3/extension-module"]
