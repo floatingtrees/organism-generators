@@ -21,8 +21,10 @@ VIEW_RES = 32
 TOTAL_CHANNELS = 16
 NUM_SCALAR_FEATURES = 4
 
-# Import the model and config from train.py
-from train.ppo.train import ActorCritic, PPOConfig
+# Import the model and config from train.py (same directory)
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+from train import ActorCritic, PPOConfig
 
 
 def env_observe(env, device: str):
