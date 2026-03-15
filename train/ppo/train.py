@@ -41,7 +41,7 @@ class PPOConfig:
     num_obstacles: int = 3
     food_cap: int = 100
     vision_cost: float = 0.05
-    initial_view_size: float = 0.0
+    initial_view_size: float = 0.1  # matches object_radius lower bound
     reset_interval: int = 1024
 
     # PPO

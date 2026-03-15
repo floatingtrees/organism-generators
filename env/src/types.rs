@@ -182,7 +182,7 @@ impl Default for EnvironmentConfig {
             food_cap: None,
             vision_cost: 0.1,
             view_res: 32,
-            initial_view_size: 0.0,
+            initial_view_size: 0.1, // matches default object_radius
             interaction_rules: InteractionRules::default(),
         }
     }

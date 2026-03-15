@@ -154,7 +154,7 @@ impl Environment {
             agent.pos += agent.vel * dt;
 
             // View size update
-            agent.view_size = (agent.view_size + vd * dt).clamp(0.0, max_vs);
+            agent.view_size = (agent.view_size + vd * dt).clamp(radius, max_vs);
 
             // Vision cost: vision_cost * view_size per second
             agent.energy -= self.config.vision_cost * agent.view_size * dt;
@@ -722,7 +722,7 @@ mod tests {
     fn view_size_clamped_to_bounds() {
         let cfg = test_config();
         let max_vs = cfg.width.max(cfg.height) / 2.0;
-        let mut env = Environment::new(1, cfg, 42);
+        let mut env = Environment::new(1, cfg.clone(), 42);
 
         // Push view_size way up
         for _ in 0..1000 {
@@ -730,11 +730,11 @@ mod tests {
         }
         assert!(env.agents[0].view_size <= max_vs + 1e-6);
 
-        // Push view_size to zero
+        // Push view_size to minimum (object_radius)
         for _ in 0..1000 {
             env.step(&[(0.0, 0.0, -100.0)]);
         }
-        assert!(env.agents[0].view_size >= -1e-6);
+        assert!(env.agents[0].view_size >= cfg.object_radius - 1e-6);
     }
 
     #[test]
