@@ -154,9 +154,13 @@ impl Environment {
             agent.energy -= accel.magnitude() * dt;
             agent.pos += agent.vel * dt;
 
-            // View size update
+            // View size update — penalize clamped (wasted) portion
             let min_vs = radius.max(self.config.min_view_size);
-            agent.view_size = (agent.view_size + vd * dt).clamp(min_vs, max_vs);
+            let desired_vs = agent.view_size + vd * dt;
+            let clamped_vs = desired_vs.clamp(min_vs, max_vs);
+            let wasted_vs = (desired_vs - clamped_vs).abs();
+            agent.energy -= wasted_vs; // penalty for illegal view action
+            agent.view_size = clamped_vs;
 
             // Vision cost: vision_cost * view_size^2 per second (quadratic)
             agent.energy -= self.config.vision_cost * agent.view_size * agent.view_size * dt;
