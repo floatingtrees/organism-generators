@@ -248,7 +248,6 @@ def inference_loop(
 
     model.eval()
     device = cfg.device
-    reset_count = 0
 
     frames = []
     obs = torch.from_numpy(video_env.observe()).reshape(-1, NUM_OBS_FEATURES).to(device)
@@ -267,21 +266,9 @@ def inference_loop(
             video_env.step(act_np)
             obs = torch.from_numpy(video_env.observe()).reshape(-1, NUM_OBS_FEATURES).to(device)
 
-            # Reset with different seed every 1024 steps
+            # Reset every 1024 steps
             if (step + 1) % 1024 == 0:
-                reset_count += 1
-                video_env = organism_env.EvolutionEnv.initialize({
-                    "num_organisms": cfg.num_agents,
-                    "height": cfg.env_height,
-                    "width": cfg.env_width,
-                    "food_spawn_rate": cfg.food_spawn_rate,
-                    "num_copies": 1,
-                    "dt": video_dt,
-                    "food_cap": cfg.food_cap,
-                    "energy_loss": cfg.energy_loss,
-                    "num_obstacles": cfg.num_obstacles,
-                    "seed": seed + reset_count * 1000,
-                })
+                video_env.reset()
                 obs = torch.from_numpy(video_env.observe()).reshape(-1, NUM_OBS_FEATURES).to(device)
 
     # Write video
