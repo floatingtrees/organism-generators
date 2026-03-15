@@ -62,6 +62,7 @@ class PPOConfig:
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     render_every: int = 100
+    video_interval: float = 600.0  # save a video every N seconds
 
     @property
     def batch_size(self) -> int:
@@ -330,6 +331,9 @@ def train(cfg: PPOConfig):
     optimizer = optim.Adam(agent.parameters(), lr=cfg.lr, eps=1e-5)
     buf = RolloutBuffer(cfg)
 
+    import os
+    os.makedirs("train/ppo/videos", exist_ok=True)
+
     n = cfg.num_envs * cfg.num_agents
     obs, alive = env_observe(env, cfg.device)
     prev_energy = alive * 10.0
@@ -337,6 +341,8 @@ def train(cfg: PPOConfig):
     global_step = 0
     env_steps_since_reset = 0
     start_time = time.time()
+    last_video_time = start_time
+    video_count = 0
     update = 0
 
     print(f"PPO-CNN | device={cfg.device} | envs={cfg.num_envs} | agents={cfg.num_agents}")
@@ -482,6 +488,14 @@ def train(cfg: PPOConfig):
             env.render(fname, env_index=0, pixels_per_unit=30.0)
             print(f"  -> saved {fname}")
 
+        # --- Periodic video checkpoint ---
+        if (time.time() - last_video_time) >= cfg.video_interval:
+            video_count += 1
+            vpath = f"train/ppo/videos/checkpoint_{video_count:03d}_step{global_step}.mp4"
+            print(f"  Generating video checkpoint {video_count}...")
+            inference_loop(model=agent, cfg=cfg, output_path=vpath)
+            last_video_time = time.time()
+
     # --- Save model ---
     torch.save(agent.state_dict(), "train/ppo/model_final.pt")
     total_elapsed = time.time() - start_time
@@ -489,14 +503,12 @@ def train(cfg: PPOConfig):
     print(f"Model saved to train/ppo/model_final.pt")
 
     # --- Generate final video ---
-    print("\nGenerating inference video...")
+    print("\nGenerating final video...")
+    video_count += 1
     inference_loop(
         model=agent,
         cfg=cfg,
-        output_path="train/ppo/final.mp4",
-        video_dt=0.04,
-        num_steps=2048,
-        pixels_per_unit=40.0,
+        output_path=f"train/ppo/videos/final_step{global_step}.mp4",
     )
 
     return agent
