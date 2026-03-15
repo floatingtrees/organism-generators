@@ -158,6 +158,11 @@ impl EvolutionEnv {
         Ok(arr.into_pyarray(py))
     }
 
+    /// True if all agents in all environments are dead.
+    fn all_dead(&self) -> bool {
+        self.inner.all_dead()
+    }
+
     /// Returns alive mask of shape (num_envs, max_agents).
     fn alive_mask<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArrayDyn<f32>>> {
         let ne = self.inner.num_envs();

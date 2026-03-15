@@ -40,6 +40,7 @@ class PPOConfig:
     num_obstacles: int = 3
     food_cap: int = 100
     vision_cost: float = 0.05
+    initial_view_size: float = 0.0
     reset_interval: int = 1024
 
     # PPO
@@ -218,6 +219,7 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
         "num_obstacles": cfg.num_obstacles,
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
+        "initial_view_size": cfg.initial_view_size,
     })
 
 
@@ -278,6 +280,7 @@ def inference_loop(
         "num_obstacles": cfg.num_obstacles,
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
+        "initial_view_size": cfg.initial_view_size,
         "seed": seed,
     })
 
@@ -370,7 +373,8 @@ def train(cfg: PPOConfig):
             obs = next_obs
             alive = next_alive
 
-            if env_steps_since_reset >= cfg.reset_interval:
+            should_reset = env_steps_since_reset >= cfg.reset_interval or env.all_dead()
+            if should_reset:
                 # Record episode returns
                 per_env = ep_return_accum.reshape(cfg.num_envs, cfg.num_agents)
                 for e in range(cfg.num_envs):

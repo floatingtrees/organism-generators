@@ -182,7 +182,7 @@ impl Default for EnvironmentConfig {
             food_cap: None,
             vision_cost: 0.1,
             view_res: 32,
-            initial_view_size: 2.0,
+            initial_view_size: 0.0,
             interaction_rules: InteractionRules::default(),
         }
     }

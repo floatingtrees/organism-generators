@@ -99,6 +99,13 @@ impl BatchedEnvironment {
     // Alive mask
     // ------------------------------------------------------------------
 
+    /// True if every real agent in every environment is dead.
+    pub fn all_dead(&self) -> bool {
+        self.envs
+            .iter()
+            .all(|env| env.agents.iter().all(|a| !a.alive))
+    }
+
     /// Flat [num_envs * max_agents] — 1.0 alive, 0.0 dead/padded.
     pub fn get_alive_mask(&self) -> Vec<f32> {
         let num_envs = self.envs.len();
