@@ -13,6 +13,7 @@ use crate::batched_env::BatchedEnvironment;
 use crate::rendering::{render_environment, save_environment_png};
 use crate::types::*;
 
+use rand::Rng;
 use std::path::Path;
 
 #[pyclass]
@@ -71,7 +72,10 @@ impl EvolutionEnv {
         let object_radius: f32 = extract_or(config, "object_radius", 0.1)?;
         let num_obstacles: usize = extract_or(config, "num_obstacles", 0)?;
         let obstacle_weight: f32 = extract_or(config, "obstacle_weight", 5.0)?;
-        let seed: u64 = extract_or(config, "seed", 42)?;
+        let seed: u64 = match config.get_item("seed")? {
+            Some(val) => val.extract()?,
+            None => rand::thread_rng().gen(),
+        };
         let food_cap: Option<usize> = match config.get_item("food_cap")? {
             Some(val) => Some(val.extract()?),
             None => None,

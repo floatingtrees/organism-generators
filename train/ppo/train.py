@@ -176,7 +176,7 @@ class RolloutBuffer:
 
 
 def make_env(cfg: PPOConfig, seed: int | None = None) -> organism_env.EvolutionEnv:
-    return organism_env.EvolutionEnv.initialize({
+    config = {
         "num_organisms": cfg.num_agents,
         "height": cfg.env_height,
         "width": cfg.env_width,
@@ -186,8 +186,10 @@ def make_env(cfg: PPOConfig, seed: int | None = None) -> organism_env.EvolutionE
         "energy_loss": cfg.energy_loss,
         "num_obstacles": cfg.num_obstacles,
         "food_cap": cfg.food_cap,
-        "seed": seed if seed is not None else cfg.seed,
-    })
+    }
+    if seed is not None:
+        config["seed"] = seed
+    return organism_env.EvolutionEnv.initialize(config)
 
 
 def env_observe(env, device: str) -> torch.Tensor:
@@ -275,6 +277,7 @@ def inference_loop(
                     "food_spawn_rate": cfg.food_spawn_rate,
                     "num_copies": 1,
                     "dt": video_dt,
+                    "food_cap": cfg.food_cap,
                     "energy_loss": cfg.energy_loss,
                     "num_obstacles": cfg.num_obstacles,
                     "seed": seed + reset_count * 1000,
@@ -297,8 +300,7 @@ def train(cfg: PPOConfig):
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    reset_count = 0
-    env = make_env(cfg, seed=cfg.seed)
+    env = make_env(cfg)
     agent = ActorCritic().to(cfg.device)
     optimizer = optim.Adam(agent.parameters(), lr=cfg.lr, eps=1e-5)
     buf = RolloutBuffer(cfg)
@@ -358,8 +360,7 @@ def train(cfg: PPOConfig):
                         if len(agent_returns) > 0:
                             rollout_ep_returns.append(agent_returns.mean().item())
 
-                reset_count += 1
-                env = make_env(cfg, seed=cfg.seed + reset_count * 97)
+                env.reset()
                 obs = env_observe(env, cfg.device)
                 prev_energy = obs[:, ALIVE] * 10.0
                 ep_return_accum = torch.zeros(n, device=cfg.device)

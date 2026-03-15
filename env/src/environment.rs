@@ -67,6 +67,9 @@ impl Environment {
     // ------------------------------------------------------------------
 
     pub fn reset(&mut self) {
+        // Derive a new seed from the current RNG so each reset produces
+        // different initial conditions while remaining deterministic.
+        self.seed = self.rng.gen();
         self.rng = SmallRng::seed_from_u64(self.seed);
         let r = self.config.object_radius;
 
@@ -683,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_restores_initial_state() {
+    fn reset_restores_clean_state() {
         let mut cfg = test_config();
         cfg.food_spawn_rate = 50.0;
         let mut env = Environment::new(3, cfg, 42);
@@ -701,6 +704,22 @@ mod tests {
             assert!((agent.energy - 10.0).abs() < 1e-6);
             assert!((agent.vel.x).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn reset_produces_different_positions() {
+        let mut env = Environment::new(3, test_config(), 42);
+        let pos_before: Vec<Vec2> = env.agents.iter().map(|a| a.pos).collect();
+
+        env.reset();
+        let pos_after: Vec<Vec2> = env.agents.iter().map(|a| a.pos).collect();
+
+        // At least one agent should have a different position
+        let any_different = pos_before
+            .iter()
+            .zip(pos_after.iter())
+            .any(|(a, b)| (a.x - b.x).abs() > 1e-6 || (a.y - b.y).abs() > 1e-6);
+        assert!(any_different, "reset should produce different positions");
     }
 
     #[test]

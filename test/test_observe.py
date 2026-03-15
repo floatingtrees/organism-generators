@@ -67,7 +67,6 @@ class TestObserve:
 
     def test_observe_after_reset(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
-        obs0 = env.observe()
 
         actions = np.ones((env.num_envs, env.max_agents, 2), dtype=np.float32) * 5.0
         for _ in range(10):
@@ -76,7 +75,18 @@ class TestObserve:
         env.reset()
         obs_reset = env.observe()
 
-        np.testing.assert_allclose(obs0, obs_reset, atol=1e-5)
+        # After reset: agents alive, zero velocity, valid positions
+        assert np.all(obs_reset[..., ALIVE] == 1.0)
+        np.testing.assert_array_equal(obs_reset[..., VX], 0.0)
+        np.testing.assert_array_equal(obs_reset[..., VY], 0.0)
+
+    def test_reset_produces_different_positions(self, small_config):
+        env = organism_env.EvolutionEnv.initialize(small_config)
+        obs0 = env.observe()
+        env.reset()
+        obs1 = env.observe()
+        # Positions should differ after reset (different seed)
+        assert not np.allclose(obs0[..., :2], obs1[..., :2])
 
     def test_positions_within_bounds(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)

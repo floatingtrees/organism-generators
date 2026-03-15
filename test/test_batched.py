@@ -60,7 +60,6 @@ class TestBatched:
 
     def test_reset_restores_all(self, variable_config):
         env = organism_env.EvolutionEnv.initialize(variable_config)
-        obs0 = env.observe()
 
         for _ in range(20):
             actions = np.random.randn(env.num_envs, env.max_agents, 2).astype(np.float32)
@@ -69,7 +68,12 @@ class TestBatched:
         env.reset()
         obs_reset = env.observe()
 
-        np.testing.assert_allclose(obs0, obs_reset, atol=1e-5)
+        # All real agents alive, zero velocity, padded slots still zero
+        assert np.all(obs_reset[0, :3, ALIVE] == 1.0)
+        assert np.all(obs_reset[1, :5, ALIVE] == 1.0)
+        assert np.all(obs_reset[2, :2, ALIVE] == 1.0)
+        np.testing.assert_array_equal(obs_reset[..., VX], 0.0)
+        np.testing.assert_array_equal(obs_reset[0, 3:], 0.0)  # padding unchanged
 
     def test_rewards_padded_agents_are_zero(self, variable_config):
         env = organism_env.EvolutionEnv.initialize(variable_config)
