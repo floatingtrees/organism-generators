@@ -155,7 +155,8 @@ impl Environment {
             agent.pos += agent.vel * dt;
 
             // View size update
-            agent.view_size = (agent.view_size + vd * dt).clamp(radius, max_vs);
+            let min_vs = radius.max(self.config.min_view_size);
+            agent.view_size = (agent.view_size + vd * dt).clamp(min_vs, max_vs);
 
             // Vision cost: vision_cost * view_size^2 per second (quadratic)
             agent.energy -= self.config.vision_cost * agent.view_size * agent.view_size * dt;
@@ -769,6 +770,7 @@ mod tests {
             vision_cost: 0.0, // no vision cost in tests by default
             view_res: 8,      // small for fast tests
             initial_view_size: 2.0,
+            min_view_size: 0.0,
             interaction_rules: InteractionRules::default(),
         }
     }
@@ -832,11 +834,12 @@ mod tests {
         }
         assert!(env.agents[0].view_size <= max_vs + 1e-6);
 
-        // Push view_size to minimum (object_radius)
+        // Push view_size to minimum: max(object_radius, min_view_size)
         for _ in 0..1000 {
             env.step(&[(0.0, 0.0, -100.0)]);
         }
-        assert!(env.agents[0].view_size >= cfg.object_radius - 1e-6);
+        let min_vs = cfg.object_radius.max(cfg.min_view_size);
+        assert!(env.agents[0].view_size >= min_vs - 1e-6);
     }
 
     #[test]

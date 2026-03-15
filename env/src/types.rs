@@ -157,6 +157,7 @@ pub struct EnvironmentConfig {
     pub vision_cost: f32,
     pub view_res: usize,
     pub initial_view_size: f32,
+    pub min_view_size: f32,
     pub interaction_rules: InteractionRules,
 }
 
@@ -185,7 +186,8 @@ impl Default for EnvironmentConfig {
             food_cap: None,
             vision_cost: 0.1,
             view_res: 32,
-            initial_view_size: 0.1, // matches default object_radius
+            initial_view_size: 0.1,
+            min_view_size: 0.0,
             interaction_rules: InteractionRules::default(),
         }
     }

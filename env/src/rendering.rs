@@ -240,6 +240,7 @@ mod tests {
             vision_cost: 0.0,
             view_res: 8,
             initial_view_size: 2.0,
+            min_view_size: 0.0,
             interaction_rules: InteractionRules::default(),
         }
     }

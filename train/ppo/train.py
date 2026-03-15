@@ -43,8 +43,9 @@ class PPOConfig:
     obstacle_radius: float = 6.0
     obstacle_weight: float = 100.0
     food_cap: int = 200  # 75% reduction from 800
-    vision_cost: float = 0.01
+    vision_cost: float = 0.001
     initial_view_size: float = 3.0
+    min_view_size: float = 2.0
     object_radius: float = 0.3
     reset_interval: int = 256
 
@@ -68,6 +69,8 @@ class PPOConfig:
     render_every: int = 100
     video_interval: float = 300.0  # save a video every N seconds
     large_run: bool = False
+    resume_path: str = ""
+    agent_collision: bool = False
 
     @property
     def batch_size(self) -> int:
@@ -261,6 +264,8 @@ def make_env(cfg: PPOConfig) -> organism_env.EvolutionEnv:
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
         "initial_view_size": cfg.initial_view_size,
+        "min_view_size": cfg.min_view_size,
+        "rules": {"agent_collision": cfg.agent_collision},
     })
 
 
@@ -331,6 +336,8 @@ def inference_loop(
         "food_cap": cfg.food_cap,
         "vision_cost": cfg.vision_cost,
         "initial_view_size": cfg.initial_view_size,
+        "min_view_size": cfg.min_view_size,
+        "rules": {"agent_collision": cfg.agent_collision},
         "seed": seed,
     })
 
@@ -374,6 +381,9 @@ def train(cfg: PPOConfig):
     agent = ActorCritic(large=cfg.large_run).to(cfg.device)
     param_count = sum(p.numel() for p in agent.parameters())
     print(f"         model params: {param_count:,} ({'large' if cfg.large_run else 'small'})")
+    if cfg.resume_path:
+        agent.load_state_dict(torch.load(cfg.resume_path, map_location=cfg.device, weights_only=True))
+        print(f"         resumed from {cfg.resume_path}")
     optimizer = optim.Adam(agent.parameters(), lr=cfg.lr, eps=1e-5)
     buf = RolloutBuffer(cfg)
 
@@ -594,7 +604,7 @@ def train(cfg: PPOConfig):
 def main():
     parser = argparse.ArgumentParser(description="PPO-CNN training for organism environment")
     parser.add_argument("--num-envs", type=int, default=64)
-    parser.add_argument("--num-agents", type=int, default=5)
+    parser.add_argument("--num-agents", type=int, default=20)
     parser.add_argument("--train-time", type=float, default=600.0)
     parser.add_argument("--rollout-len", type=int, default=128)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -604,6 +614,8 @@ def main():
     parser.add_argument("--reset-interval", type=int, default=1024)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--large-run", action="store_true", help="Use ~1M param model")
+    parser.add_argument("--resume", type=str, default="", help="Path to checkpoint to resume from")
+    parser.add_argument("--agent-collision", action="store_true", help="Enable agent-agent collision")
     args = parser.parse_args()
 
     cfg = PPOConfig(
@@ -618,6 +630,8 @@ def main():
         reset_interval=args.reset_interval,
         device=args.device,
         large_run=args.large_run,
+        resume_path=args.resume,
+        agent_collision=args.agent_collision,
     )
     train(cfg)
 

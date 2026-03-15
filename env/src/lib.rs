@@ -69,6 +69,7 @@ impl EvolutionEnv {
         let vision_cost: f32 = extract_or(config, "vision_cost", 0.1)?;
         let view_res: usize = extract_or(config, "view_res", 32)?;
         let initial_view_size: f32 = extract_or(config, "initial_view_size", 2.0)?;
+        let min_view_size: f32 = extract_or(config, "min_view_size", 0.0)?;
         let obstacle_radius: f32 = extract_or(config, "obstacle_radius", object_radius)?;
 
         // --- interaction rules ---
@@ -107,6 +108,7 @@ impl EvolutionEnv {
             vision_cost,
             view_res,
             initial_view_size,
+            min_view_size,
             interaction_rules: rules,
         };
 
