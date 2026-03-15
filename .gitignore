@@ -209,3 +209,8 @@ __marimo__/
 target/
 **/*.rs.bk
 Cargo.lock
+
+# Training artifacts
+train/**/*.pt
+train/**/*.mp4
+train/**/*.png
