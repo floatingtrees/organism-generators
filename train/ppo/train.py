@@ -35,7 +35,7 @@ class PPOConfig:
     num_agents: int = 5
     env_width: float = 15.0
     env_height: float = 15.0
-    food_spawn_rate: float = 5.0
+    food_spawn_rate: float = 25.0  # items per second of sim time
     dt: float = 0.2
     energy_loss: float = 0.02
     num_obstacles: int = 3

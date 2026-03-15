@@ -1,6 +1,7 @@
 mod batched_env;
 mod environment;
 mod rendering;
+mod spatial_hash;
 mod types;
 
 use ndarray::{ArrayD, IxDyn};

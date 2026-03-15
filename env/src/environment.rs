@@ -1,5 +1,6 @@
 /// Single environment instance with continuous 2D physics.
 
+use crate::spatial_hash::SpatialHash;
 use crate::types::*;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -12,6 +13,7 @@ pub struct Environment {
     pub step_count: u64,
     rng: SmallRng,
     seed: u64,
+    spatial: SpatialHash,
 }
 
 impl Environment {
@@ -33,6 +35,10 @@ impl Environment {
             });
         }
 
+        // Cell size = 1.0 is a good default for object_radius=0.1 (covers many radii per cell)
+        let cell_size = (config.object_radius * 10.0).max(0.5);
+        let spatial = SpatialHash::new(config.width, config.height, cell_size);
+
         Self {
             config,
             agents,
@@ -41,6 +47,7 @@ impl Environment {
             step_count: 0,
             rng,
             seed,
+            spatial,
         }
     }
 
@@ -103,11 +110,8 @@ impl Environment {
             let (ax, ay) = if i < actions.len() { actions[i] } else { (0.0, 0.0) };
             let accel = Vec2::new(ax, ay);
 
-            // Velocity update
             agent.vel += accel * dt;
-            // Energy cost of acceleration
             agent.energy -= accel.magnitude() * dt;
-            // Position update
             agent.pos += agent.vel * dt;
         }
 
@@ -136,17 +140,17 @@ impl Environment {
             }
         }
 
-        // 5. Obstacle collisions (elastic)
+        // 5. Obstacle collisions (elastic) — spatial hash accelerated
         if self.config.interaction_rules.obstacle_collision {
             self.handle_obstacle_collisions(radius);
         }
 
-        // 6. Agent-agent collisions (elastic, optional)
+        // 6. Agent-agent collisions (elastic, optional) — spatial hash accelerated
         if self.config.interaction_rules.agent_collision {
             self.handle_agent_collisions(radius);
         }
 
-        // 7. Food collection
+        // 7. Food collection — spatial hash accelerated
         if self.config.interaction_rules.food_collection {
             self.collect_food(radius);
         }
@@ -229,17 +233,32 @@ impl Environment {
     }
 
     // ------------------------------------------------------------------
-    // Obstacle collisions (elastic)
+    // Obstacle collisions (elastic) — spatial hash
     // ------------------------------------------------------------------
 
     fn handle_obstacle_collisions(&mut self, agent_radius: f32) {
+        if self.obstacles.is_empty() {
+            return;
+        }
+
+        // Build spatial hash of obstacles
+        let obs_positions: Vec<Vec2> = self.obstacles.iter().map(|o| o.pos).collect();
+        self.spatial.build(&obs_positions);
+
+        let max_obstacle_radius = self.obstacles.iter().map(|o| o.radius).fold(0.0f32, f32::max);
+        let search_radius = agent_radius + max_obstacle_radius;
+
         for agent_idx in 0..self.agents.len() {
             if !self.agents[agent_idx].alive {
                 continue;
             }
-            for obs_idx in 0..self.obstacles.len() {
+            let nearby = self.spatial.query_nearby(self.agents[agent_idx].pos, search_radius);
+
+            for obs_idx in nearby {
                 let collision_dist = agent_radius + self.obstacles[obs_idx].radius;
-                let dist = self.agents[agent_idx].pos.distance_to(&self.obstacles[obs_idx].pos);
+                let dist = self.agents[agent_idx]
+                    .pos
+                    .distance_to(&self.obstacles[obs_idx].pos);
 
                 if dist >= collision_dist || dist < 1e-8 {
                     continue;
@@ -253,7 +272,6 @@ impl Environment {
                 let rel_vel = self.agents[agent_idx].vel - self.obstacles[obs_idx].vel;
                 let vel_along_normal = rel_vel.dot(&normal);
 
-                // Only resolve if approaching
                 if vel_along_normal > 0.0 {
                     continue;
                 }
@@ -262,7 +280,6 @@ impl Environment {
                 let obstacle_mass = self.obstacles[obs_idx].weight;
                 let total_mass = agent_mass + obstacle_mass;
 
-                // Elastic impulse
                 let impulse = -2.0 * vel_along_normal / total_mass;
 
                 self.agents[agent_idx].vel.x += impulse * obstacle_mass * normal.x;
@@ -270,7 +287,6 @@ impl Environment {
                 self.obstacles[obs_idx].vel.x -= impulse * agent_mass * normal.x;
                 self.obstacles[obs_idx].vel.y -= impulse * agent_mass * normal.y;
 
-                // Separate overlapping bodies
                 let overlap = collision_dist - dist;
                 let agent_shift = overlap * obstacle_mass / total_mass;
                 let obs_shift = overlap * agent_mass / total_mass;
@@ -283,18 +299,28 @@ impl Environment {
     }
 
     // ------------------------------------------------------------------
-    // Agent-agent collisions (elastic, optional)
+    // Agent-agent collisions (elastic, optional) — spatial hash
     // ------------------------------------------------------------------
 
     fn handle_agent_collisions(&mut self, radius: f32) {
         let collision_dist = radius * 2.0;
         let n = self.agents.len();
+        if n < 2 {
+            return;
+        }
+
+        // Build spatial hash of agents
+        let agent_positions: Vec<Vec2> = self.agents.iter().map(|a| a.pos).collect();
+        self.spatial.build(&agent_positions);
+
         for i in 0..n {
             if !self.agents[i].alive {
                 continue;
             }
-            for j in (i + 1)..n {
-                if !self.agents[j].alive {
+            let nearby = self.spatial.query_nearby(self.agents[i].pos, collision_dist);
+
+            for j in nearby {
+                if j <= i || !self.agents[j].alive {
                     continue;
                 }
                 let dist = self.agents[i].pos.distance_to(&self.agents[j].pos);
@@ -310,7 +336,6 @@ impl Environment {
                 if vel_along_normal > 0.0 {
                     continue;
                 }
-                // Equal-mass elastic collision
                 let impulse = -vel_along_normal;
                 self.agents[i].vel.x += impulse * normal.x;
                 self.agents[i].vel.y += impulse * normal.y;
@@ -327,25 +352,35 @@ impl Environment {
     }
 
     // ------------------------------------------------------------------
-    // Food collection
+    // Food collection — spatial hash
     // ------------------------------------------------------------------
 
     fn collect_food(&mut self, agent_radius: f32) {
+        if self.foods.is_empty() {
+            return;
+        }
+
         let food_radius = self.config.object_radius;
         let collection_dist = agent_radius + food_radius;
+
+        // Build spatial hash of food
+        let food_positions: Vec<Vec2> = self.foods.iter().map(|f| f.pos).collect();
+        self.spatial.build(&food_positions);
+
         let mut food_collected = vec![false; self.foods.len()];
 
         for agent in &mut self.agents {
             if !agent.alive {
                 continue;
             }
-            for (j, food) in self.foods.iter().enumerate() {
-                if food_collected[j] {
+            let nearby = self.spatial.query_nearby(agent.pos, collection_dist);
+            for food_idx in nearby {
+                if food_collected[food_idx] {
                     continue;
                 }
-                if agent.pos.distance_to(&food.pos) < collection_dist {
+                if agent.pos.distance_to(&food_positions[food_idx]) < collection_dist {
                     agent.energy += 1.0;
-                    food_collected[j] = true;
+                    food_collected[food_idx] = true;
                 }
             }
         }
@@ -359,7 +394,7 @@ impl Environment {
     }
 
     // ------------------------------------------------------------------
-    // Food spawning
+    // Food spawning — dt-independent (rate is per second of sim time)
     // ------------------------------------------------------------------
 
     fn spawn_food(&mut self) {
@@ -370,9 +405,11 @@ impl Environment {
             }
         }
 
-        let rate = self.config.food_spawn_rate;
-        let num_to_spawn = rate as usize;
-        let fractional = rate - num_to_spawn as f32;
+        // food_spawn_rate is items per second of sim time.
+        // Expected spawns this step = rate * dt.
+        let expected = self.config.food_spawn_rate * self.config.dt;
+        let num_to_spawn = expected as usize;
+        let fractional = expected - num_to_spawn as f32;
 
         let mut total = num_to_spawn;
         if self.rng.gen::<f32>() < fractional {
@@ -423,6 +460,16 @@ impl Environment {
     pub fn num_agents(&self) -> usize {
         self.agents.len()
     }
+
+    /// Get the food positions (for spatial hash queries from outside).
+    pub fn food_positions(&self) -> Vec<Vec2> {
+        self.foods.iter().map(|f| f.pos).collect()
+    }
+
+    /// Return the reusable spatial hash reference (for nearest-K queries etc).
+    pub fn spatial_hash(&mut self) -> &mut SpatialHash {
+        &mut self.spatial
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -466,7 +513,6 @@ mod tests {
         let p0 = env.agents[0].pos;
         let p1 = env.agents[1].pos;
 
-        // Zero acceleration, zero initial velocity → no movement
         env.step(&[(0.0, 0.0), (0.0, 0.0)]);
 
         assert!((env.agents[0].pos.x - p0.x).abs() < 1e-6);
@@ -481,12 +527,9 @@ mod tests {
         let p0 = env.agents[0].pos;
         let dt = env.config.dt;
 
-        // Accelerate in +x
         env.step(&[(1.0, 0.0)]);
 
-        // vel should be (1*dt, 0)
         assert!((env.agents[0].vel.x - dt).abs() < 1e-6);
-        // pos should be p0.x + vel*dt = p0.x + dt*dt
         assert!((env.agents[0].pos.x - (p0.x + dt * dt)).abs() < 1e-5);
     }
 
@@ -506,16 +549,13 @@ mod tests {
         let cfg = test_config();
         let mut env = Environment::new(1, cfg.clone(), 42);
 
-        // Place agent near right wall, moving right fast
         env.agents[0].pos = Vec2::new(9.95, 5.0);
         env.agents[0].vel = Vec2::new(10.0, 0.0);
         env.agents[0].energy = 100.0;
 
         env.step(&[(0.0, 0.0)]);
 
-        // Velocity x should have flipped
         assert!(env.agents[0].vel.x < 0.0);
-        // Position should be clamped within bounds
         assert!(env.agents[0].pos.x <= cfg.width - cfg.object_radius + 0.001);
     }
 
@@ -530,7 +570,6 @@ mod tests {
 
         env.step(&[(0.0, 0.0)]);
 
-        // Should have lost 10% of energy from wall bounce
         assert!(env.agents[0].energy < 100.0);
     }
 
@@ -543,7 +582,6 @@ mod tests {
         env.agents[0].vel = Vec2::zero();
         let e0 = env.agents[0].energy;
 
-        // Place food right on top of agent
         env.foods.push(Food {
             pos: Vec2::new(5.0, 5.0),
         });
@@ -555,13 +593,64 @@ mod tests {
     }
 
     #[test]
-    fn food_spawning() {
-        let mut cfg = test_config();
-        cfg.food_spawn_rate = 3.0;
-        let mut env = Environment::new(1, cfg, 42);
+    fn food_spawning_dt_independent() {
+        // Same rate, different dt → same food per second of sim time
+        let mut cfg1 = test_config();
+        cfg1.food_spawn_rate = 50.0; // 50 per second
+        cfg1.dt = 0.1;
+        let mut env1 = Environment::new(0, cfg1, 42);
 
-        env.step(&[(0.0, 0.0)]);
-        assert_eq!(env.foods.len(), 3);
+        let mut cfg2 = test_config();
+        cfg2.food_spawn_rate = 50.0;
+        cfg2.dt = 0.01;
+        let mut env2 = Environment::new(0, cfg2, 42);
+
+        // Run 1 second of sim time for each
+        for _ in 0..10 {
+            env1.step(&[]);
+        }
+        for _ in 0..100 {
+            env2.step(&[]);
+        }
+
+        // Both should have spawned ~50 food (allow some variance from RNG)
+        let diff = (env1.foods.len() as f32 - env2.foods.len() as f32).abs();
+        assert!(
+            diff < 15.0,
+            "food counts should be similar: {} vs {}",
+            env1.foods.len(),
+            env2.foods.len()
+        );
+    }
+
+    #[test]
+    fn food_cap_respected() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 100.0; // very high rate
+        cfg.food_cap = Some(10);
+        let mut env = Environment::new(0, cfg, 42);
+
+        for _ in 0..100 {
+            env.step(&[]);
+        }
+
+        assert!(
+            env.foods.len() <= 10,
+            "food count {} exceeds cap 10",
+            env.foods.len()
+        );
+    }
+
+    #[test]
+    fn food_cap_allows_spawning_below_cap() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 100.0;
+        cfg.food_cap = Some(50);
+        let mut env = Environment::new(0, cfg, 42);
+
+        env.step(&[]);
+        assert!(env.foods.len() > 0);
+        assert!(env.foods.len() <= 50);
     }
 
     #[test]
@@ -596,7 +685,7 @@ mod tests {
     #[test]
     fn reset_restores_initial_state() {
         let mut cfg = test_config();
-        cfg.food_spawn_rate = 5.0;
+        cfg.food_spawn_rate = 50.0;
         let mut env = Environment::new(3, cfg, 42);
 
         for _ in 0..10 {
@@ -625,7 +714,7 @@ mod tests {
         env.agents[0].vel = Vec2::new(1.0, 0.0);
 
         env.obstacles.push(Obstacle {
-            pos: Vec2::new(5.15, 5.0), // close enough to collide
+            pos: Vec2::new(5.15, 5.0),
             vel: Vec2::zero(),
             weight: 1.0,
             radius: 0.1,
@@ -633,8 +722,6 @@ mod tests {
 
         env.step(&[(0.0, 0.0)]);
 
-        // After elastic collision with equal mass, velocities should swap
-        // Agent should have slowed down or reversed, obstacle should be moving
         assert!(env.obstacles[0].vel.x.abs() > 0.01);
     }
 }
