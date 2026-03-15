@@ -85,18 +85,22 @@ class ActorCritic(nn.Module):
     def __init__(self, in_channels: int = TOTAL_CHANNELS, act_dim: int = NUM_ACTIONS):
         super().__init__()
 
-        # Shared CNN backbone: 32x32 → 16x16 → 8x8 → 4x4
+        # Shared CNN backbone: 32x32 → 16x16 → 8x8 → 4x4 → 2x2
         self.cnn = nn.Sequential(
-            nn.Conv2d(in_channels, 32, 3, stride=2, padding=1),
+            nn.Conv2d(in_channels, 32, 3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
+            nn.MaxPool2d(2),          # 32x32 → 16x16
+            nn.Conv2d(32, 64, 3, stride=1, padding=1),
             nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=2, padding=1),
+            nn.MaxPool2d(2),          # 16x16 → 8x8
+            nn.Conv2d(64, 64, 3, stride=1, padding=1),
             nn.ReLU(),
+            nn.MaxPool2d(2),          # 8x8 → 4x4
+            nn.AdaptiveMaxPool2d(2),  # 4x4 → 2x2
             nn.Flatten(),
         )
-        # 64 * 4 * 4 = 1024
-        cnn_out = 64 * 4 * 4
+        # 64 * 2 * 2 = 256
+        cnn_out = 64 * 2 * 2
 
         self.fc = nn.Sequential(
             nn.Linear(cnn_out, 256),
