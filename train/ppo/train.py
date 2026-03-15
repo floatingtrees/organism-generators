@@ -48,7 +48,7 @@ class PPOConfig:
     initial_view_size: float = 3.0
     min_view_size: float = 2.0
     object_radius: float = 0.3
-    energy_decay_rate: float = 0.95
+    energy_decay_rate: float = 1.0
     reset_interval: int = 256
 
     # PPO
@@ -309,12 +309,13 @@ def inference_loop(
     model: ActorCritic,
     cfg: PPOConfig,
     output_path: str = "train/ppo/final.mp4",
-    num_steps: int = 8192,
+    max_realtime_seconds: float = 60.0,
     target_resolution: int = 800,
     seed: int = 9999,
     speed_multiplier: float = 3.0,
 ):
-    video_dt = cfg.dt  # same dt as training
+    video_dt = cfg.dt
+    num_steps = int(max_realtime_seconds * speed_multiplier / video_dt)
     fps = speed_multiplier / video_dt
 
     # Scale pixels_per_unit so the image fits target_resolution
@@ -419,7 +420,7 @@ def train(cfg: PPOConfig):
 
     # --- Initial video (random policy, short) ---
     print("Generating initial video (untrained policy)...")
-    inference_loop(model=agent, cfg=cfg, output_path="train/ppo/videos/initial_step0.mp4", num_steps=2048)
+    inference_loop(model=agent, cfg=cfg, output_path="train/ppo/videos/initial_step0.mp4", max_realtime_seconds=20.0)
 
     while (time.time() - start_time) < cfg.train_time:
         update += 1
