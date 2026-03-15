@@ -303,6 +303,7 @@ def train(cfg: PPOConfig):
     n = cfg.num_envs * cfg.num_agents
     obs = env_observe(env, cfg.device)
     prev_energy = obs[:, ALIVE] * 10.0
+    ep_return_accum = torch.zeros(n, device=cfg.device)
     global_step = 0
     env_steps_since_reset = 0
     start_time = time.time()
@@ -323,7 +324,8 @@ def train(cfg: PPOConfig):
             optimizer.param_groups[0]["lr"] = cfg.lr * max(frac, 0.0)
 
         # --- Collect rollout ---
-        ep_rewards = []
+        # Episode return tracking: accumulate rewards between resets
+        rollout_ep_returns = []  # completed episode returns this rollout
 
         for step in range(cfg.rollout_len):
             global_step += n
@@ -338,16 +340,26 @@ def train(cfg: PPOConfig):
             prev_energy = energy.clone()
 
             buf.insert(obs, action, log_prob, reward, value, alive)
+            ep_return_accum += reward
             obs = next_obs
-
-            ep_rewards.append(reward[alive > 0].mean().item() if (alive > 0).any() else 0.0)
 
             # Reset with different seed every reset_interval steps
             if env_steps_since_reset >= cfg.reset_interval:
+                # Record completed episode returns (mean per alive agent per env)
+                alive_mask = ep_return_accum != 0
+                if alive_mask.any():
+                    # Reshape to (num_envs, num_agents) and take per-env mean
+                    per_env = ep_return_accum.reshape(cfg.num_envs, cfg.num_agents)
+                    for e in range(cfg.num_envs):
+                        agent_returns = per_env[e][per_env[e] != 0]
+                        if len(agent_returns) > 0:
+                            rollout_ep_returns.append(agent_returns.mean().item())
+
                 reset_count += 1
                 env = make_env(cfg, seed=cfg.seed + reset_count * 97)
                 obs = env_observe(env, cfg.device)
                 prev_energy = obs[:, ALIVE] * 10.0
+                ep_return_accum = torch.zeros(n, device=cfg.device)
                 env_steps_since_reset = 0
 
         # --- Compute advantages ---
@@ -405,10 +417,22 @@ def train(cfg: PPOConfig):
         # --- Logging ---
         elapsed = time.time() - start_time
         sps = global_step / elapsed
-        mean_ep_reward = np.mean(ep_rewards)
 
-        cur_obs = env_observe(env, cfg.device)
-        alive_count = int((cur_obs[:, ALIVE] > 0).sum().item())
+        # Expected episode return (mean over completed episodes this rollout)
+        mean_ep_return = np.mean(rollout_ep_returns) if rollout_ep_returns else float("nan")
+
+        # Mean critic predicted value and mean energy for alive agents
+        with torch.no_grad():
+            cur_obs = env_observe(env, cfg.device)
+            _, _, _, cur_values = agent.get_action_and_value(cur_obs)
+            alive_mask = cur_obs[:, ALIVE] > 0
+            alive_count = int(alive_mask.sum().item())
+            mean_value = cur_values[alive_mask].mean().item() if alive_count > 0 else 0.0
+            # Get current energies from a peek step
+            energy_np = np.array(env.observe()[:, :, ALIVE]).reshape(-1)  # alive flags
+            # Actually read energy from rewards — just use prev_energy
+            alive_energies = prev_energy[alive_mask]
+            mean_energy = alive_energies.mean().item() if alive_count > 0 else 0.0
 
         if update % 10 == 0 or update <= 3:
             print(
@@ -416,10 +440,11 @@ def train(cfg: PPOConfig):
                 f"t={elapsed:5.0f}s/{cfg.train_time:.0f}s | "
                 f"step {global_step:>10,} | "
                 f"sps {sps:>8,.0f} | "
-                f"reward {mean_ep_reward:+.4f} | "
+                f"ep_return {mean_ep_return:+7.2f} | "
+                f"V(s) {mean_value:+7.2f} | "
+                f"energy {mean_energy:+7.2f} | "
                 f"pg {total_pg_loss / num_batches:+.4f} | "
                 f"vf {total_vf_loss / num_batches:.3f} | "
-                f"ent {total_ent_loss / num_batches:.3f} | "
                 f"clip {total_clip_frac / num_batches:.3f} | "
                 f"alive {alive_count}/{n} | "
                 f"lr {optimizer.param_groups[0]['lr']:.1e}"
