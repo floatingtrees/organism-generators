@@ -363,7 +363,9 @@ def inference_loop(
             video_env.step(act_np)
             obs, scalars, _ = env_observe(video_env, device)
 
-            if (step + 1) % 1024 == 0:
+            # Reset at same sim-time as training: scale steps by dt ratio
+            video_reset_interval = int(cfg.reset_interval * cfg.dt / video_dt)
+            if (step + 1) % video_reset_interval == 0:
                 video_env.reset()
                 obs, scalars, _ = env_observe(video_env, device)
 
