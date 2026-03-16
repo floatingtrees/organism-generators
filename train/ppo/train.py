@@ -22,6 +22,7 @@ NUM_ACTIONS = 3  # (ax, ay, view_delta)
 VIEW_RES = 32
 TOTAL_CHANNELS = 16  # 4 object channels × 4 temporal frames
 NUM_SCALAR_FEATURES = 4  # energy, vx, vy, view_size
+MEMORY_DIM = 128
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +50,7 @@ class PPOConfig:
     min_view_size: float = 2.0
     object_radius: float = 0.3
     energy_decay_rate: float = 1.0
+    memory_decay_rate: float = 0.99
     reset_interval: int = 256
 
     # PPO
@@ -85,16 +87,20 @@ class PPOConfig:
 
 
 class ActorCritic(nn.Module):
-    """CNN actor-critic for image-based observations.
+    """CNN actor-critic with memory reservoir.
 
-    Input: (B, H, W, C) → permuted to (B, C, H, W) internally.
-    Actor: outputs mean for (ax, ay, view_delta).
-    Critic: outputs scalar value.
+    Input: (B, H, W, C) image + (B, 4) scalars + (B, 128) memory_in
+    Output: action, log_prob, entropy, value, memory_out
+
+    Memory is concatenated with CNN flatten output before FC layers.
+    Gradient does NOT cross steps — memory_in is always detached.
     """
 
     def __init__(self, in_channels: int = TOTAL_CHANNELS, act_dim: int = NUM_ACTIONS,
-                 scalar_dim: int = NUM_SCALAR_FEATURES, large: bool = False):
+                 scalar_dim: int = NUM_SCALAR_FEATURES, memory_dim: int = MEMORY_DIM,
+                 large: bool = False):
         super().__init__()
+        self.memory_dim = memory_dim
 
         if large:
             self.cnn = nn.Sequential(
@@ -131,9 +137,9 @@ class ActorCritic(nn.Module):
             cnn_out = 64 * 2 * 2
             fc_hidden = 256
 
-        # CNN output + scalar side channel → FC
+        # CNN flatten + scalars + memory_in → FC
         self.fc = nn.Sequential(
-            nn.Linear(cnn_out + scalar_dim, fc_hidden),
+            nn.Linear(cnn_out + scalar_dim + memory_dim, fc_hidden),
             nn.ReLU(),
             nn.Linear(fc_hidden, fc_hidden),
             nn.ReLU(),
@@ -141,7 +147,8 @@ class ActorCritic(nn.Module):
 
         self.actor_mean = nn.Linear(fc_hidden, act_dim)
         self.critic_head = nn.Linear(fc_hidden, 1)
-        self.log_std = nn.Parameter(torch.full((act_dim,), -1.0))  # std=0.37, smaller initial actions
+        self.memory_head = nn.Linear(fc_hidden, memory_dim)
+        self.log_std = nn.Parameter(torch.full((act_dim,), -1.0))
 
         # Init
         for m in self.modules():
@@ -152,19 +159,23 @@ class ActorCritic(nn.Module):
         nn.init.zeros_(self.actor_mean.bias)
         nn.init.orthogonal_(self.critic_head.weight, gain=1.0)
         nn.init.zeros_(self.critic_head.bias)
+        # Memory head starts near zero so initial memory writes are small
+        nn.init.orthogonal_(self.memory_head.weight, gain=0.01)
+        nn.init.zeros_(self.memory_head.bias)
 
-    def _encode(self, obs: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
-        # obs: (B, H, W, C) → (B, C, H, W)
+    def _encode(self, obs: torch.Tensor, scalars: torch.Tensor, memory_in: torch.Tensor) -> torch.Tensor:
         x = obs.permute(0, 3, 1, 2).contiguous()
         cnn_out = self.cnn(x)
-        # Concatenate scalar side channel
-        combined = torch.cat([cnn_out, scalars], dim=-1)
+        # Memory is concatenated at the CNN flatten level (before FC)
+        # NOTE: memory_in must be detached before calling this — no gradient crosses steps
+        combined = torch.cat([cnn_out, scalars, memory_in], dim=-1)
         return self.fc(combined)
 
     def get_action_and_value(
-        self, obs: torch.Tensor, scalars: torch.Tensor, action: torch.Tensor | None = None
+        self, obs: torch.Tensor, scalars: torch.Tensor, memory_in: torch.Tensor,
+        action: torch.Tensor | None = None
     ):
-        h = self._encode(obs, scalars)
+        h = self._encode(obs, scalars, memory_in)
         mean = self.actor_mean(h)
         std = self.log_std.exp()
         dist = torch.distributions.Normal(mean, std)
@@ -175,7 +186,8 @@ class ActorCritic(nn.Module):
         log_prob = dist.log_prob(action).sum(-1)
         entropy = dist.entropy().sum(-1)
         value = self.critic_head(h).squeeze(-1)
-        return action, log_prob, entropy, value
+        memory_out = self.memory_head(h)
+        return action, log_prob, entropy, value, memory_out
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +203,7 @@ class RolloutBuffer:
 
         self.obs = torch.zeros(T, n, VIEW_RES, VIEW_RES, TOTAL_CHANNELS, device=dev)
         self.scalars = torch.zeros(T, n, NUM_SCALAR_FEATURES, device=dev)
+        self.memory = torch.zeros(T, n, MEMORY_DIM, device=dev)
         self.actions = torch.zeros(T, n, NUM_ACTIONS, device=dev)
         self.log_probs = torch.zeros(T, n, device=dev)
         self.rewards = torch.zeros(T, n, device=dev)
@@ -199,9 +212,10 @@ class RolloutBuffer:
         self.cfg = cfg
         self.step = 0
 
-    def insert(self, obs, scalars, actions, log_probs, rewards, values, alive):
+    def insert(self, obs, scalars, memory, actions, log_probs, rewards, values, alive):
         self.obs[self.step] = obs
         self.scalars[self.step] = scalars
+        self.memory[self.step] = memory
         self.actions[self.step] = actions
         self.log_probs[self.step] = log_probs
         self.rewards[self.step] = rewards
@@ -231,6 +245,7 @@ class RolloutBuffer:
         total = self.cfg.rollout_len * self.cfg.num_envs * self.cfg.num_agents
         obs = self.obs.reshape(total, VIEW_RES, VIEW_RES, TOTAL_CHANNELS)
         scalars = self.scalars.reshape(total, NUM_SCALAR_FEATURES)
+        memory = self.memory.reshape(total, MEMORY_DIM)
         actions = self.actions.reshape(total, -1)
         log_probs = self.log_probs.reshape(total)
         advantages = self.advantages.reshape(total)
@@ -242,7 +257,8 @@ class RolloutBuffer:
 
         for start in range(0, total, mb_size):
             idx = indices[start : start + mb_size]
-            yield obs[idx], scalars[idx], actions[idx], log_probs[idx], advantages[idx], returns[idx], alive[idx]
+            yield (obs[idx], scalars[idx], memory[idx], actions[idx],
+                   log_probs[idx], advantages[idx], returns[idx], alive[idx])
 
 
 # ---------------------------------------------------------------------------
@@ -352,14 +368,20 @@ def inference_loop(
     device = cfg.device
 
     frames = []
+    n_video = cfg.num_agents
     obs, scalars, _ = env_observe(video_env, device)
+    memory = torch.zeros(n_video, MEMORY_DIM, device=device)
+    factor = cfg.memory_decay_rate ** video_dt
 
     with torch.no_grad():
         for step in range(num_steps):
             frame = video_env.render_array(env_index=0, pixels_per_unit=pixels_per_unit)
             frames.append(frame)
 
-            action, _, _, _ = model.get_action_and_value(obs, scalars)
+            action, _, _, _, mem_out = model.get_action_and_value(obs, scalars, memory)
+            # Memory update — no gradient needed (inference)
+            memory = memory * factor + (1 - factor) * mem_out
+
             act_np = action.reshape(1, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
             video_env.step(act_np)
             obs, scalars, _ = env_observe(video_env, device)
@@ -367,12 +389,83 @@ def inference_loop(
             if (step + 1) % cfg.reset_interval == 0:
                 video_env.reset()
                 obs, scalars, _ = env_observe(video_env, device)
+                memory = torch.zeros(n_video, MEMORY_DIM, device=device)
 
     frames_arr = np.stack(frames)
     iio.imwrite(output_path, frames_arr, fps=fps, codec="libx264")
     duration = num_steps * video_dt
     video_duration = len(frames) / fps
     print(f"Video saved: {output_path} ({len(frames)} frames, {duration:.1f}s sim, {video_duration:.1f}s video, {speed_multiplier:.0f}x speed)")
+
+
+# ---------------------------------------------------------------------------
+# Evaluation: memory vs no-memory
+# ---------------------------------------------------------------------------
+
+
+def evaluate_memory(model: ActorCritic, cfg: PPOConfig, num_episodes: int = 5):
+    """Run episodes with and without memory to check if the agent uses it.
+
+    Returns (mean_return_with_memory, mean_return_without_memory).
+    """
+    device = cfg.device
+    model.eval()
+
+    def run_episodes(use_memory: bool) -> float:
+        eval_env = organism_env.EvolutionEnv.initialize({
+            "num_organisms": cfg.num_agents,
+            "height": cfg.env_height, "width": cfg.env_width,
+            "food_spawn_rate": cfg.food_spawn_rate, "num_copies": 1,
+            "dt": cfg.dt, "energy_loss": cfg.energy_loss,
+            "wall_velocity_damping": cfg.wall_velocity_damping,
+            "object_radius": cfg.object_radius,
+            "num_obstacles": cfg.num_obstacles,
+            "obstacle_radius": cfg.obstacle_radius,
+            "obstacle_weight": cfg.obstacle_weight,
+            "food_cap": cfg.food_cap, "vision_cost": cfg.vision_cost,
+            "initial_view_size": cfg.initial_view_size,
+            "min_view_size": cfg.min_view_size,
+            "energy_decay_rate": cfg.energy_decay_rate,
+            "rules": {"agent_collision": cfg.agent_collision},
+        })
+
+        ep_returns = []
+        factor = cfg.memory_decay_rate ** cfg.dt
+
+        with torch.no_grad():
+            for _ in range(num_episodes):
+                eval_env.reset()
+                obs, scalars, alive = env_observe(eval_env, device)
+                memory = torch.zeros(cfg.num_agents, MEMORY_DIM, device=device)
+                total_reward = 0.0
+                prev_e = alive * 10.0
+
+                for step in range(cfg.reset_interval):
+                    action, _, _, _, mem_out = model.get_action_and_value(obs, scalars, memory)
+
+                    if use_memory:
+                        memory = memory * factor + (1 - factor) * mem_out
+                    # else: memory stays zero — agent gets no memory
+
+                    act_np = action.reshape(1, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
+                    energy_np = eval_env.step(act_np)
+                    energy = torch.from_numpy(energy_np).reshape(-1).to(device)
+                    obs, scalars, alive = env_observe(eval_env, device)
+
+                    reward = ((energy - prev_e) * alive).sum().item()
+                    prev_e = energy.clone()
+                    total_reward += reward
+
+                    if eval_env.all_dead():
+                        break
+
+                ep_returns.append(total_reward / cfg.num_agents)
+
+        return np.mean(ep_returns)
+
+    ret_with = run_episodes(use_memory=True)
+    ret_without = run_episodes(use_memory=False)
+    return ret_with, ret_without
 
 
 # ---------------------------------------------------------------------------
@@ -401,10 +494,12 @@ def train(cfg: PPOConfig):
 
     n = cfg.num_envs * cfg.num_agents
     obs, scalars, alive = env_observe(env, cfg.device)
+    memory = torch.zeros(n, MEMORY_DIM, device=cfg.device)
+    mem_factor = cfg.memory_decay_rate ** cfg.dt
     prev_energy = alive * 10.0
     ep_return_accum = torch.zeros(n, device=cfg.device)
-    ep_length = 0  # steps since last reset
-    recent_ep_returns = deque(maxlen=100)  # persists across rollouts
+    ep_length = 0
+    recent_ep_returns = deque(maxlen=100)
     global_step = 0
     env_steps_since_reset = 0
     start_time = time.time()
@@ -440,7 +535,14 @@ def train(cfg: PPOConfig):
             ep_length += 1
 
             with torch.no_grad():
-                action, log_prob, _, value = agent.get_action_and_value(obs, scalars)
+                # NOTE: memory is detached — no gradient crosses steps
+                action, log_prob, _, value, mem_out = agent.get_action_and_value(
+                    obs, scalars, memory.detach()
+                )
+                # Memory reservoir update: exponential moving average
+                # factor = decay_rate^dt, new = old * factor + (1 - factor) * output
+                # Detached: gradient does not flow through memory across steps
+                new_memory = memory.detach() * mem_factor + (1 - mem_factor) * mem_out.detach()
 
             energy, next_obs, next_scalars, next_alive = env_step(
                 env, action, cfg.num_envs, cfg.num_agents, cfg.device
@@ -448,7 +550,8 @@ def train(cfg: PPOConfig):
             reward = (energy - prev_energy) * alive
             prev_energy = energy.clone()
 
-            buf.insert(obs, scalars, action, log_prob, reward, value, alive)
+            buf.insert(obs, scalars, memory.detach(), action, log_prob, reward, value, alive)
+            memory = new_memory
             ep_return_accum += reward
             obs = next_obs
             scalars = next_scalars
@@ -476,6 +579,7 @@ def train(cfg: PPOConfig):
 
                 env.reset()
                 obs, scalars, alive = env_observe(env, cfg.device)
+                memory = torch.zeros(n, MEMORY_DIM, device=cfg.device)
                 prev_energy = alive * 10.0
                 ep_return_accum = torch.zeros(n, device=cfg.device)
                 ep_length = 0
@@ -483,7 +587,7 @@ def train(cfg: PPOConfig):
 
         # --- Compute advantages ---
         with torch.no_grad():
-            _, _, _, next_value = agent.get_action_and_value(obs, scalars)
+            _, _, _, next_value, _ = agent.get_action_and_value(obs, scalars, memory.detach())
         buf.compute_gae(next_value, alive)
 
         # --- PPO update ---
@@ -494,10 +598,12 @@ def train(cfg: PPOConfig):
         num_batches = 0
 
         for epoch in range(cfg.num_epochs):
-            for mb_obs, mb_scalars, mb_act, mb_old_lp, mb_adv, mb_ret, mb_alive in buf.get_batches(
+            for mb_obs, mb_scalars, mb_mem, mb_act, mb_old_lp, mb_adv, mb_ret, mb_alive in buf.get_batches(
                 cfg.num_minibatches
             ):
-                _, new_lp, entropy, new_val = agent.get_action_and_value(mb_obs, mb_scalars, mb_act)
+                # NOTE: mb_mem is already detached (stored detached in buffer)
+                # No gradient flows through memory across steps
+                _, new_lp, entropy, new_val, _ = agent.get_action_and_value(mb_obs, mb_scalars, mb_mem, mb_act)
 
                 # Normalize advantages over alive agents
                 alive_mask = mb_alive > 0
@@ -547,7 +653,7 @@ def train(cfg: PPOConfig):
 
         with torch.no_grad():
             cur_obs, cur_scalars, cur_alive = env_observe(env, cfg.device)
-            _, _, _, cur_values = agent.get_action_and_value(cur_obs, cur_scalars)
+            _, _, _, cur_values, _ = agent.get_action_and_value(cur_obs, cur_scalars, memory.detach())
             alive_mask = cur_alive > 0
             alive_count = int(alive_mask.sum().item())
             mean_value = cur_values[alive_mask].mean().item() if alive_count > 0 else 0.0
@@ -590,6 +696,13 @@ def train(cfg: PPOConfig):
     total_elapsed = time.time() - start_time
     print(f"\nTraining done: {update} updates, {global_step:,} steps in {total_elapsed:.1f}s")
     print(f"Model saved to train/ppo/model_final.pt")
+
+    # --- Evaluate memory usage ---
+    print("\nEvaluating memory reservoir usage...")
+    ret_with, ret_without = evaluate_memory(agent, cfg)
+    print(f"  With memory:    ep_return = {ret_with:+.2f}")
+    print(f"  Without memory: ep_return = {ret_without:+.2f}")
+    print(f"  Delta:          {ret_with - ret_without:+.2f} ({'memory helps' if ret_with > ret_without else 'no benefit yet'})")
 
     # --- Generate final video ---
     print("\nGenerating final video...")

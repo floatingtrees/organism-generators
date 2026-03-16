@@ -100,7 +100,11 @@ def main():
         "rules": {"agent_collision": args.agent_collision},
     })
 
+    from train import MEMORY_DIM
+
     obs, scalars, alive = env_observe(env, device)
+    memory = torch.zeros(cfg.num_agents, MEMORY_DIM, device=device)
+    factor = cfg.memory_decay_rate ** dt
     frames = []
     start_time = time.time()
 
@@ -109,14 +113,15 @@ def main():
             frame = env.render_array(env_index=0, pixels_per_unit=pixels_per_unit)
             frames.append(frame)
 
-            action, _, _, _ = model.get_action_and_value(obs, scalars)
+            action, _, _, _, mem_out = model.get_action_and_value(obs, scalars, memory)
+            memory = memory * factor + (1 - factor) * mem_out
+
             act_np = action.reshape(1, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
             env.step(act_np)
             obs, scalars, alive = env_observe(env, device)
 
-            # Stop if all agents are dead
             if env.all_dead():
-                sim_time = (step + 1) * args.dt
+                sim_time = (step + 1) * dt
                 print(f"All agents dead at step {step + 1} ({sim_time:.1f}s sim time)")
                 break
 
