@@ -227,14 +227,14 @@ impl Environment {
             let signal = if signal_prob > 0.5 { 1.0 } else { 0.0 };
             self.module_graphs[i].propagate_signal(signal);
 
-            // Destroy action (if destroy coords are nonzero)
+            // Destroy action (requires high magnitude to trigger — prevents accidental destroys)
             let destroy_pos = Vec2::new(destroy_x, destroy_y);
-            if destroy_pos.magnitude() > 0.1 {
-                if let Some((mod_id, _dist)) = self.module_graphs[i].find_nearest_module(destroy_pos) {
-                    let removed = self.module_graphs[i].destroy_module(mod_id);
-                    // Drop food at each removed module's world position
-                    for pos in removed {
-                        self.foods.push(Food { pos });
+            if destroy_pos.magnitude() > 2.0 {
+                if self.agents[i].energy >= 3.0 {
+                    if let Some((mod_id, _dist)) = self.module_graphs[i].find_nearest_module(destroy_pos) {
+                        self.agents[i].energy -= 3.0;
+                        self.module_graphs[i].destroy_module(mod_id);
+                        // No food drop on destroy — prevents exploit of build/destroy cycling
                     }
                 }
             }
@@ -1295,28 +1295,28 @@ mod tests {
     }
 
     #[test]
-    fn destroy_drops_food() {
+    fn destroy_costs_energy() {
         let mut cfg = test_config();
         cfg.food_spawn_rate = 0.0;
         let mut env = Environment::new(1, cfg, 42);
 
-        // Build a segment (instant)
+        // Build a segment
         let mut actions = zero_actions(1);
-        actions[6] = 0.5;
-        actions[9] = 0.5;
-        actions[10] = 1.0;
+        actions[10] = 1.0; // segment
         env.step(&actions);
         assert_eq!(env.module_graphs[0].alive_count(), 1);
+
+        let energy_before = env.agents[0].energy;
         let food_before = env.foods.len();
 
-        // Destroy it
+        // Destroy it (need magnitude > 2.0)
         let mut destroy_actions = zero_actions(1);
-        destroy_actions[4] = 0.5; // destroy_x
-        destroy_actions[5] = 0.0; // destroy_y
+        destroy_actions[4] = 3.0; // destroy_x (magnitude > 2)
         env.step(&destroy_actions);
 
         assert_eq!(env.module_graphs[0].alive_count(), 0);
-        assert!(env.foods.len() > food_before);
+        assert!(env.agents[0].energy < energy_before - 2.5); // cost 3 energy
+        assert_eq!(env.foods.len(), food_before); // no food dropped
     }
 
     #[test]
