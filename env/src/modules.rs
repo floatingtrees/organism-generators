@@ -238,13 +238,17 @@ impl ModuleGraph {
     // Build
     // ------------------------------------------------------------------
 
-    /// Find a free slot for building. For segments: attach to root.
-    /// For non-segments (mouths, gates, thrusters): attach to a segment endpoint.
-    /// Returns module_id or ROOT_ID, or None if no valid slot.
+    /// Find a free slot for building.
+    /// Prefers segment endpoints over root so modules extend the agent's reach.
+    /// Falls back to root if no segments have free slots.
     pub fn find_any_free_slot(&self) -> Option<usize> {
-        // For now, always attach to root (segments branch from agent body)
-        // Non-segment modules will also attach to root initially,
-        // then snap to nearest segment endpoint in add_module
+        // First try: segment endpoints with free slots
+        for m in &self.modules {
+            if m.alive && m.module_type == ModuleType::Segment && m.has_free_slot() {
+                return Some(m.id);
+            }
+        }
+        // Fallback: root (always has unlimited slots)
         Some(ROOT_ID)
     }
 

@@ -326,7 +326,8 @@ impl Environment {
 
         // 8. Food collection (agent body + mouths)
         if self.config.interaction_rules.food_collection {
-            self.collect_food(radius);
+            // Only mouths collect food — body does NOT collect directly.
+            // This makes building mouths essential for survival.
             self.collect_food_mouths();
         }
 
