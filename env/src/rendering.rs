@@ -1,6 +1,7 @@
 /// Rendering an environment to an RGB image buffer and saving as PNG.
 
 use crate::environment::Environment;
+use crate::modules::ModuleType;
 use image::{ImageBuffer, Rgb};
 use std::path::Path;
 
@@ -68,8 +69,65 @@ pub fn render_environment(
         // Draw dashed view-size circle
         if agent.alive && agent.view_size > 0.0 {
             let view_r = agent.view_size * pixels_per_unit;
-            let dash_color = [color[0] / 2, color[1] / 2, color[2] / 2]; // dimmed agent color
+            let dash_color = [color[0] / 2, color[1] / 2, color[2] / 2];
             draw_dashed_ring(&mut buf, img_w, img_h, cx, cy, view_r, dash_color, 6.0, 4.0);
+        }
+
+        // Draw modules for this agent
+        let mg = &env.module_graphs[agent.id];
+        let dim_color = [color[0] / 2 + 30, color[1] / 2 + 30, color[2] / 2 + 30];
+        for m in &mg.modules {
+            if !m.alive {
+                continue;
+            }
+            match m.module_type {
+                ModuleType::Segment => {
+                    // Draw as filled rectangle along the segment line
+                    let sx = m.world_pos.x * pixels_per_unit;
+                    let sy = m.world_pos.y * pixels_per_unit;
+                    let ex = m.world_end.x * pixels_per_unit;
+                    let ey = m.world_end.y * pixels_per_unit;
+                    draw_thick_line(&mut buf, img_w, img_h, sx, sy, ex, ey,
+                        (0.2 * pixels_per_unit).max(2.0), dim_color);
+                }
+                ModuleType::Or => {
+                    // OR gate: curved D-shape (simplified as circle)
+                    let px = m.world_pos.x * pixels_per_unit;
+                    let py = m.world_pos.y * pixels_per_unit;
+                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    draw_circle(&mut buf, img_w, img_h, px, py, r, [200, 200, 50]);
+                }
+                ModuleType::And => {
+                    // AND gate: D-shape (simplified as filled square)
+                    let px = m.world_pos.x * pixels_per_unit;
+                    let py = m.world_pos.y * pixels_per_unit;
+                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    draw_rect(&mut buf, img_w, img_h, px, py, r, [50, 200, 200]);
+                }
+                ModuleType::Xor => {
+                    // XOR gate: diamond
+                    let px = m.world_pos.x * pixels_per_unit;
+                    let py = m.world_pos.y * pixels_per_unit;
+                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    draw_diamond(&mut buf, img_w, img_h, px, py, r, [200, 50, 200]);
+                }
+                ModuleType::Thruster => {
+                    // Arrow pointing in thrust direction
+                    let px = m.world_pos.x * pixels_per_unit;
+                    let py = m.world_pos.y * pixels_per_unit;
+                    let r = (0.12 * pixels_per_unit).max(3.0);
+                    draw_triangle(&mut buf, img_w, img_h, px, py, r,
+                        m.rotation + env.agents[agent.id].rotation, [255, 100, 50]);
+                }
+                ModuleType::Mouth => {
+                    // Star shape
+                    let px = m.world_pos.x * pixels_per_unit;
+                    let py = m.world_pos.y * pixels_per_unit;
+                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    draw_circle(&mut buf, img_w, img_h, px, py, r, [50, 255, 100]);
+                    draw_circle(&mut buf, img_w, img_h, px, py, r * 0.5, [255, 255, 255]);
+                }
+            }
         }
     }
 
@@ -186,6 +244,115 @@ fn draw_dashed_ring(
             }
         }
     }
+}
+
+fn draw_thick_line(
+    buf: &mut [u8], img_w: usize, img_h: usize,
+    x1: f32, y1: f32, x2: f32, y2: f32, thickness: f32, color: [u8; 3],
+) {
+    let half = thickness * 0.5;
+    let min_x = ((x1.min(x2) - half).floor() as i32).max(0) as usize;
+    let max_x = ((x1.max(x2) + half).ceil() as i32).min(img_w as i32 - 1).max(0) as usize;
+    let min_y = ((y1.min(y2) - half).floor() as i32).max(0) as usize;
+    let max_y = ((y1.max(y2) + half).ceil() as i32).min(img_h as i32 - 1).max(0) as usize;
+
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len_sq = dx * dx + dy * dy;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let px = x as f32;
+            let py = y as f32;
+            let dist = if len_sq < 1e-6 {
+                ((px - x1) * (px - x1) + (py - y1) * (py - y1)).sqrt()
+            } else {
+                let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
+                let t = t.clamp(0.0, 1.0);
+                let cx = x1 + t * dx;
+                let cy = y1 + t * dy;
+                ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt()
+            };
+            if dist <= half {
+                set_pixel(buf, img_w, x, y, color);
+            }
+        }
+    }
+}
+
+fn draw_rect(
+    buf: &mut [u8], img_w: usize, img_h: usize,
+    cx: f32, cy: f32, half_size: f32, color: [u8; 3],
+) {
+    let min_x = ((cx - half_size).floor() as i32).max(0) as usize;
+    let max_x = ((cx + half_size).ceil() as i32).min(img_w as i32 - 1).max(0) as usize;
+    let min_y = ((cy - half_size).floor() as i32).max(0) as usize;
+    let max_y = ((cy + half_size).ceil() as i32).min(img_h as i32 - 1).max(0) as usize;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            set_pixel(buf, img_w, x, y, color);
+        }
+    }
+}
+
+fn draw_diamond(
+    buf: &mut [u8], img_w: usize, img_h: usize,
+    cx: f32, cy: f32, radius: f32, color: [u8; 3],
+) {
+    let r = radius.max(1.0);
+    let min_x = ((cx - r).floor() as i32).max(0) as usize;
+    let max_x = ((cx + r).ceil() as i32).min(img_w as i32 - 1).max(0) as usize;
+    let min_y = ((cy - r).floor() as i32).max(0) as usize;
+    let max_y = ((cy + r).ceil() as i32).min(img_h as i32 - 1).max(0) as usize;
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = (x as f32 - cx).abs();
+            let dy = (y as f32 - cy).abs();
+            if dx + dy <= r {
+                set_pixel(buf, img_w, x, y, color);
+            }
+        }
+    }
+}
+
+fn draw_triangle(
+    buf: &mut [u8], img_w: usize, img_h: usize,
+    cx: f32, cy: f32, radius: f32, rotation: f32, color: [u8; 3],
+) {
+    // Triangle pointing in rotation direction
+    let r = radius.max(2.0);
+    let tip_x = cx + r * rotation.cos();
+    let tip_y = cy + r * rotation.sin();
+    let back_angle = std::f32::consts::PI * 0.8;
+    let l_x = cx + r * 0.6 * (rotation + back_angle).cos();
+    let l_y = cy + r * 0.6 * (rotation + back_angle).sin();
+    let r_x = cx + r * 0.6 * (rotation - back_angle).cos();
+    let r_y = cy + r * 0.6 * (rotation - back_angle).sin();
+
+    // Fill triangle using bounding box + barycentric test
+    let min_x = (tip_x.min(l_x).min(r_x).floor() as i32).max(0) as usize;
+    let max_x = (tip_x.max(l_x).max(r_x).ceil() as i32).min(img_w as i32 - 1).max(0) as usize;
+    let min_y = (tip_y.min(l_y).min(r_y).floor() as i32).max(0) as usize;
+    let max_y = (tip_y.max(l_y).max(r_y).ceil() as i32).min(img_h as i32 - 1).max(0) as usize;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let px = x as f32;
+            let py = y as f32;
+            if point_in_triangle(px, py, tip_x, tip_y, l_x, l_y, r_x, r_y) {
+                set_pixel(buf, img_w, x, y, color);
+            }
+        }
+    }
+}
+
+fn point_in_triangle(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) -> bool {
+    let d1 = (px - x2) * (y1 - y2) - (x1 - x2) * (py - y2);
+    let d2 = (px - x3) * (y2 - y3) - (x2 - x3) * (py - y3);
+    let d3 = (px - x1) * (y3 - y1) - (x3 - x1) * (py - y1);
+    let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+    !(has_neg && has_pos)
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
