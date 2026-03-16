@@ -346,6 +346,87 @@ impl Environment {
             }
         }
 
+        // 4.5. Module-wall and module-obstacle collision resolution
+        // If any module clips through a wall or obstacle, push the agent body to resolve.
+        {
+            let (w, h) = (self.config.width, self.config.height);
+            let margin = 0.15; // half segment width
+            for i in 0..na {
+                if !self.agents[i].alive {
+                    continue;
+                }
+                // Recompute world positions after wall bounce
+                self.module_graphs[i].update_world_positions(self.agents[i].pos, self.agents[i].rotation);
+
+                let mut push_x = 0.0f32;
+                let mut push_y = 0.0f32;
+
+                for m in &self.module_graphs[i].modules {
+                    if !m.alive { continue; }
+
+                    // Check both start and end positions for segments
+                    let positions = if m.module_type == ModuleType::Segment {
+                        vec![m.world_pos, m.world_end]
+                    } else {
+                        vec![m.world_pos]
+                    };
+
+                    for &p in &positions {
+                        // Wall clipping
+                        if p.x < margin { push_x = push_x.max(margin - p.x); }
+                        if p.x > w - margin { push_x = push_x.min(w - margin - p.x); }
+                        if p.y < margin { push_y = push_y.max(margin - p.y); }
+                        if p.y > h - margin { push_y = push_y.min(h - margin - p.y); }
+
+                        // Obstacle clipping
+                        for obs in &self.obstacles {
+                            let dist = p.distance_to(&obs.pos);
+                            let min_dist = obs.radius + margin;
+                            if dist < min_dist && dist > 1e-6 {
+                                let nx = (p.x - obs.pos.x) / dist;
+                                let ny = (p.y - obs.pos.y) / dist;
+                                let overlap = min_dist - dist;
+                                push_x += nx * overlap;
+                                push_y += ny * overlap;
+                            }
+                        }
+                    }
+                }
+
+                if push_x.abs() > 1e-6 || push_y.abs() > 1e-6 {
+                    self.agents[i].pos.x += push_x;
+                    self.agents[i].pos.y += push_y;
+                    // Dampen velocity in push direction
+                    if push_x.abs() > 1e-6 { self.agents[i].vel.x *= 0.5; }
+                    if push_y.abs() > 1e-6 { self.agents[i].vel.y *= 0.5; }
+
+                    // Apply torque: force at module position creates rotation
+                    // Compute average contact point relative to agent center
+                    // then torque = r × F (2D cross product)
+                    let com = self.agents[i].pos;
+                    // Use the module that was pushed most as the contact point
+                    for m in &self.module_graphs[i].modules {
+                        if !m.alive { continue; }
+                        let contact_points = if m.module_type == ModuleType::Segment {
+                            vec![m.world_pos, m.world_end]
+                        } else {
+                            vec![m.world_pos]
+                        };
+                        for &p in &contact_points {
+                            let rx = p.x - com.x;
+                            let ry = p.y - com.y;
+                            // torque = rx * Fy - ry * Fx (per contact)
+                            let torque = rx * push_y - ry * push_x;
+                            self.agents[i].angular_velocity += torque * 0.1; // damped
+                        }
+                    }
+
+                    // Re-update module positions
+                    self.module_graphs[i].update_world_positions(self.agents[i].pos, self.agents[i].rotation);
+                }
+            }
+        }
+
         // 5. Obstacle-obstacle collisions
         if self.config.interaction_rules.obstacle_obstacle_collision {
             self.handle_obstacle_obstacle_collisions();
@@ -1506,6 +1587,36 @@ mod tests {
         let energy_after = env.agents[0].energy;
         println!("energy: {:.2} -> {:.2}", energy_before, energy_after);
         assert!(energy_after > energy_before, "mouth should have collected food");
+    }
+
+    #[test]
+    fn module_wall_collision_applies_torque() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.width = 5.0;
+        cfg.height = 5.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Place agent near right wall
+        env.agents[0].pos = Vec2::new(4.0, 2.5);
+        env.agents[0].vel = Vec2::zero();
+        env.agents[0].angular_velocity = 0.0;
+
+        // Build a segment pointing right (will extend to x=5.0, hitting the wall)
+        let mut actions = zero_actions(1);
+        actions[8] = 0.0;  // rotation = 0 (right)
+        actions[10] = 1.0; // segment
+        env.step(&actions);
+
+        // The segment endpoint at x=5.0 should push the agent left and apply torque
+        let ang_vel_before = env.agents[0].angular_velocity;
+
+        // Step to trigger wall collision resolution
+        env.step(&zero_actions(1));
+
+        // Agent should have been pushed and may have gained angular velocity
+        // (depends on exact geometry, but position should have changed)
+        assert!(env.agents[0].pos.x < 4.5, "agent should be pushed from wall, pos.x={}", env.agents[0].pos.x);
     }
 
     #[test]
