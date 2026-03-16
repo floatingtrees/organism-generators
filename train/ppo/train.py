@@ -39,21 +39,21 @@ class PPOConfig:
     num_agents: int = 20
     env_width: float = 30.0
     env_height: float = 30.0
-    food_spawn_rate: float = 30.0   # reduced to make mouths valuable
+    food_spawn_rate: float = 15.0   # very scarce to make mouths essential
     dt: float = 0.15
     energy_loss: float = 0.02
     num_obstacles: int = 3
     obstacle_radius: float = 3.0
     obstacle_weight: float = 50.0
     wall_velocity_damping: float = 0.5
-    food_cap: int = 80
+    food_cap: int = 40
     vision_cost: float = 0.001
     initial_view_size: float = 3.0
     min_view_size: float = 2.0
     object_radius: float = 0.3
     energy_decay_rate: float = 1.0
     memory_decay_rate: float = 0.99
-    reset_interval: int = 10000
+    reset_interval: int = 2000
 
     # PPO
     train_time: float = 600.0
@@ -459,6 +459,8 @@ def evaluate_memory(model: ActorCritic, cfg: PPOConfig, num_episodes: int = 15):
             "rules": {"agent_collision": cfg.agent_collision},
         })
 
+    eval_steps = min(cfg.reset_interval, 1000)  # cap eval at 1000 steps
+
     def run_one_episode(eval_env, num_agents: int, use_memory: bool) -> float:
         eval_env.reset()
         obs, scalars, alive = env_observe(eval_env, device)
@@ -467,7 +469,7 @@ def evaluate_memory(model: ActorCritic, cfg: PPOConfig, num_episodes: int = 15):
         prev_e = alive * 10.0
 
         with torch.no_grad():
-            for step in range(cfg.reset_interval):
+            for step in range(eval_steps):
                 action, _, _, _, mem_out = model.get_action_and_value(obs, scalars, memory)
                 if use_memory:
                     memory = memory * factor + (1 - factor) * mem_out

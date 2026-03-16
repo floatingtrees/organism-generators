@@ -608,7 +608,7 @@ impl Environment {
         if self.foods.is_empty() {
             return;
         }
-        let mouth_radius = 0.2;
+        let mouth_radius = 1.5; // large radius so mouths are clearly beneficial
         let food_radius = self.config.object_radius;
         let collection_dist = mouth_radius + food_radius;
 
