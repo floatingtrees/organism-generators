@@ -252,6 +252,7 @@ impl Environment {
                         let attach_id = self.module_graphs[i].find_any_free_slot();
                         if let Some(attach_id) = attach_id {
                             // Position: offset from attachment point along build_rotation
+                            let seg_len = 1.0; // constant segment length
                             let attach_pos = if attach_id == ROOT_ID {
                                 Vec2::zero()
                             } else if let Some(m) = self.module_graphs[i].get(attach_id) {
@@ -263,17 +264,29 @@ impl Environment {
                             } else {
                                 Vec2::zero()
                             };
+                            let module_offset = if build_type == ModuleType::Segment { seg_len } else { 0.3 };
                             let build_local = Vec2::new(
-                                attach_pos.x + build_len.clamp(0.1, 1.0) * build_rot.cos(),
-                                attach_pos.y + build_len.clamp(0.1, 1.0) * build_rot.sin(),
+                                attach_pos.x + module_offset * build_rot.cos(),
+                                attach_pos.y + module_offset * build_rot.sin(),
                             );
 
-                            self.agents[i].energy -= cost;
-                            self.module_graphs[i].add_module(
-                                build_type, build_local, build_rot,
-                                build_len.clamp(0.1, 1.0), attach_id,
-                            );
-                            self.module_graphs[i].build_cooldown = (1.0 / dt).ceil() as u32;
+                            // Self-collision check: new module must not overlap existing modules
+                            // (body overlap is OK for direct root attachments)
+                            let min_clearance = 0.25;
+                            let self_collision = self.module_graphs[i].modules.iter().any(|m| {
+                                if !m.alive { return false; }
+                                let d = m.local_pos.distance_to(&build_local);
+                                d < min_clearance
+                            });
+
+                            if !self_collision {
+                                self.agents[i].energy -= cost;
+                                self.module_graphs[i].add_module(
+                                    build_type, build_local, build_rot,
+                                    seg_len, attach_id,
+                                );
+                                self.module_graphs[i].build_cooldown = (1.0 / dt).ceil() as u32;
+                            }
                         }
                         // No penalty for no free slot — just skip
                     }
