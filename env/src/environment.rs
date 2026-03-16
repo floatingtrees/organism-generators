@@ -1401,6 +1401,65 @@ mod tests {
     }
 
     #[test]
+    fn mouth_collects_food() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Build a mouth (instant)
+        let mut actions = zero_actions(1);
+        actions[10] = 6.0; // mouth
+        env.step(&actions);
+        assert_eq!(env.module_graphs[0].alive_count(), 1);
+
+        // Place food right at the agent's position
+        let agent_pos = env.agents[0].pos;
+        env.foods.push(Food { pos: agent_pos });
+        let food_count_before = env.foods.len();
+        let energy_before = env.agents[0].energy;
+
+        // Step — mouth should collect the food
+        env.step(&zero_actions(1));
+
+        println!("food before={} after={}", food_count_before, env.foods.len());
+        println!("energy before={} after={}", energy_before, env.agents[0].energy);
+        // mouth_radius=0.5 + food_radius=0.1 = 0.6 collection dist
+        // food is at distance 0 from agent (same pos as mouth)
+        assert!(env.foods.len() < food_count_before, "food should have been collected");
+        assert!(env.agents[0].energy > energy_before, "energy should have increased");
+    }
+
+    #[test]
+    fn mouth_collects_food_via_action() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Build mouth via action
+        let mut actions = zero_actions(1);
+        actions[10] = 6.0; // mouth
+        env.step(&actions);
+        assert_eq!(env.module_graphs[0].alive_count(), 1, "mouth should be built");
+
+        // Check the mouth world_pos
+        let mouths = env.module_graphs[0].alive_mouths();
+        assert_eq!(mouths.len(), 1, "should have 1 mouth");
+        let mouth_pos = mouths[0];
+        let agent_pos = env.agents[0].pos;
+        println!("agent_pos=({:.2},{:.2}) mouth_pos=({:.2},{:.2})",
+            agent_pos.x, agent_pos.y, mouth_pos.x, mouth_pos.y);
+
+        // Place food right at the mouth position
+        env.foods.push(Food { pos: mouth_pos });
+        let energy_before = env.agents[0].energy;
+
+        env.step(&zero_actions(1));
+        let energy_after = env.agents[0].energy;
+        println!("energy: {:.2} -> {:.2}", energy_before, energy_after);
+        assert!(energy_after > energy_before, "mouth should have collected food");
+    }
+
+    #[test]
     fn build_cooldown_prevents_rapid_building() {
         let mut cfg = test_config();
         cfg.food_spawn_rate = 0.0;
