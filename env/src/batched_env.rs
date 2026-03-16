@@ -57,10 +57,11 @@ impl BatchedEnvironment {
             .enumerate()
             .for_each(|(i, env)| {
                 let n = env.num_agents();
-                let env_actions: Vec<(f32, f32, f32)> = (0..n)
-                    .map(|j| {
+                // Extract flat action slice for this env
+                let env_actions: Vec<f32> = (0..n)
+                    .flat_map(|j| {
                         let base = (i * max_a + j) * NUM_ACTIONS;
-                        (actions[base], actions[base + 1], actions[base + 2])
+                        (0..NUM_ACTIONS).map(move |k| actions[base + k])
                     })
                     .collect();
                 env.step(&env_actions);
@@ -254,8 +255,8 @@ mod tests {
     fn envs_are_independent() {
         let mut be = BatchedEnvironment::new(vec![1, 1], test_config(), 42);
         let mut actions = vec![0.0f32; 2 * 1 * NUM_ACTIONS];
-        actions[0] = 5.0;  // env0 ax
-        actions[3] = -5.0; // env1 ax
+        actions[0] = 5.0;  // env0 agent0 ax
+        actions[NUM_ACTIONS] = -5.0; // env1 agent0 ax
 
         let p0 = be.envs[0].agents[0].pos;
         let p1 = be.envs[1].agents[0].pos;

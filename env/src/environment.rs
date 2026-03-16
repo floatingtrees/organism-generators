@@ -1,34 +1,44 @@
 /// Single environment instance with continuous 2D physics and egocentric views.
 
+use crate::modules::{ModuleGraph, ModuleType, PendingBuild, ROOT_ID, point_near_segment};
 use crate::spatial_hash::SpatialHash;
 use crate::types::*;
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
 
-/// Observation channels per frame: food, alive_agent, dead_agent, obstacle.
-pub const NUM_VIEW_CHANNELS: usize = 4;
-/// Scalar self-state features: energy, vx, vy, view_size.
-pub const NUM_SCALAR_FEATURES: usize = 4;
+/// Observation channels per frame:
+/// 0: food, 1: alive_agent, 2: dead_agent, 3: obstacle,
+/// 4: own_segment, 5: own_gate, 6: own_thruster, 7: own_mouth,
+/// 8: other_segment, 9: other_gate, 10: other_thruster, 11: other_mouth
+pub const NUM_VIEW_CHANNELS: usize = 12;
+/// Scalar self-state features: energy, vx, vy, view_size, rotation.
+pub const NUM_SCALAR_FEATURES: usize = 5;
 /// Number of previous frames stacked with the current frame.
 pub const NUM_HISTORY_FRAMES: usize = 3;
-/// Total channels in an observation: 4 channels × (1 current + 3 history).
+/// Total channels in an observation: 12 channels × (1 current + 3 history).
 pub const TOTAL_VIEW_CHANNELS: usize = NUM_VIEW_CHANNELS * (1 + NUM_HISTORY_FRAMES);
-/// Action dimensions: (ax, ay, view_delta).
-pub const NUM_ACTIONS: usize = 3;
+/// Continuous action dimensions: ax, ay, view_delta, signal, destroy_x, destroy_y,
+/// build_x, build_y, build_rotation, build_length.
+pub const NUM_CONTINUOUS_ACTIONS: usize = 10;
+/// Discrete action (build_type): 0=none, 1=segment, 2=OR, 3=AND, 4=XOR, 5=thruster, 6=mouth.
+pub const NUM_BUILD_TYPES: usize = 7;
+/// Total action dimensions passed from Python (continuous + discrete as one-hot or index).
+pub const NUM_ACTIONS: usize = NUM_CONTINUOUS_ACTIONS + 1; // +1 for build_type index
 
 pub struct Environment {
     pub config: EnvironmentConfig,
     pub agents: Vec<Agent>,
+    pub module_graphs: Vec<ModuleGraph>,
     pub foods: Vec<Food>,
     pub obstacles: Vec<Obstacle>,
     pub step_count: u64,
     rng: SmallRng,
     seed: u64,
     spatial: SpatialHash,
-    /// Current rendered views for all agents: [num_agents * res * res * NUM_VIEW_CHANNELS].
+    /// Current rendered views for all agents.
     current_view: Vec<f32>,
-    /// Ring buffer of 3 previous frames (front = most recent).
+    /// Ring buffer of previous frames.
     frame_history: VecDeque<Vec<f32>>,
 }
 
@@ -70,9 +80,12 @@ impl Environment {
             .map(|_| vec![0.0; frame_size])
             .collect();
 
+        let module_graphs: Vec<ModuleGraph> = (0..num_agents).map(|_| ModuleGraph::new()).collect();
+
         let mut env = Self {
             config,
             agents,
+            module_graphs,
             foods: Vec::new(),
             obstacles,
             step_count: 0,
@@ -110,6 +123,9 @@ impl Environment {
         }
 
         self.foods.clear();
+        for mg in &mut self.module_graphs {
+            *mg = ModuleGraph::new();
+        }
 
         for obstacle in &mut self.obstacles {
             let obs_r = obstacle.radius;
@@ -133,42 +149,134 @@ impl Environment {
     // Step
     // ------------------------------------------------------------------
 
-    pub fn step(&mut self, actions: &[(f32, f32, f32)]) {
+    /// Step the environment. `actions` is a flat slice of length num_agents * NUM_ACTIONS.
+    /// Per agent: [ax, ay, view_delta, signal, destroy_x, destroy_y,
+    ///             build_x, build_y, build_rotation, build_length, build_type_index]
+    pub fn step(&mut self, actions: &[f32]) {
         let dt = self.config.dt;
         let radius = self.config.object_radius;
         let max_vs = self.config.width.max(self.config.height) / 2.0;
+        let na = self.agents.len();
+        let build_delay_steps = (1.0 / dt).ceil() as u32; // 1 sim-second
 
-        // 1. Apply accelerations and view updates to alive agents
-        for (i, agent) in self.agents.iter_mut().enumerate() {
-            if !agent.alive {
+        // 1. Parse actions, apply physics, handle builds/destroys
+        for i in 0..na {
+            if !self.agents[i].alive {
                 continue;
             }
-            let (ax, ay, vd) = if i < actions.len() {
-                actions[i]
+            let base = i * NUM_ACTIONS;
+            let (ax_local, ay_local) = if base + 1 < actions.len() {
+                (actions[base], actions[base + 1])
             } else {
-                (0.0, 0.0, 0.0)
+                (0.0, 0.0)
             };
-            let accel = Vec2::new(ax, ay);
+            let view_delta = if base + 2 < actions.len() { actions[base + 2] } else { 0.0 };
+            let signal_prob = if base + 3 < actions.len() { actions[base + 3] } else { 0.0 };
+            let destroy_x = if base + 4 < actions.len() { actions[base + 4] } else { 0.0 };
+            let destroy_y = if base + 5 < actions.len() { actions[base + 5] } else { 0.0 };
+            let build_x = if base + 6 < actions.len() { actions[base + 6] } else { 0.0 };
+            let build_y = if base + 7 < actions.len() { actions[base + 7] } else { 0.0 };
+            let build_rot = if base + 8 < actions.len() { actions[base + 8] } else { 0.0 };
+            let build_len = if base + 9 < actions.len() { actions[base + 9] } else { 0.0 };
+            let build_type_idx = if base + 10 < actions.len() { actions[base + 10] as usize } else { 0 };
 
-            agent.vel += accel * dt;
-            agent.energy -= accel.magnitude() * dt;
-            agent.pos += agent.vel * dt;
+            let rot = self.agents[i].rotation;
 
-            // View size update — penalize clamped (wasted) portion
-            let min_vs = radius.max(self.config.min_view_size);
-            let desired_vs = agent.view_size + vd * dt;
-            let clamped_vs = desired_vs.clamp(min_vs, max_vs);
+            // Rotate acceleration from local to world frame
+            let ax_world = ax_local * rot.cos() - ay_local * rot.sin();
+            let ay_world = ax_local * rot.sin() + ay_local * rot.cos();
+            let accel = Vec2::new(ax_world, ay_world);
+
+            self.agents[i].vel += accel * dt;
+            self.agents[i].energy -= accel.magnitude() * dt;
+            let vel = self.agents[i].vel;
+            self.agents[i].pos += vel * dt;
+
+            // Rotation update from angular velocity
+            let ang_vel = self.agents[i].angular_velocity;
+            self.agents[i].rotation += ang_vel * dt;
+
+            // Thruster effects (force + torque)
+            let (tfx, tfy, torque) = self.module_graphs[i].compute_thruster_effects(
+                self.agents[i].pos, rot, accel.magnitude().max(1.0),
+            );
+            self.agents[i].vel.x += tfx * dt;
+            self.agents[i].vel.y += tfy * dt;
+            self.agents[i].angular_velocity += torque * dt;
+            // Dampen angular velocity slightly
+            self.agents[i].angular_velocity *= 0.98;
+
+            // View size update
+            let min_vs_val = radius.max(self.config.min_view_size);
+            let desired_vs = self.agents[i].view_size + view_delta * dt;
+            let clamped_vs = desired_vs.clamp(min_vs_val, max_vs);
             let wasted_vs = (desired_vs - clamped_vs).abs();
-            agent.energy -= wasted_vs; // penalty for illegal view action
-            agent.view_size = clamped_vs;
+            self.agents[i].energy -= wasted_vs;
+            self.agents[i].view_size = clamped_vs;
 
-            // Vision cost: vision_cost * view_size^2 per second (quadratic)
-            agent.energy -= self.config.vision_cost * agent.view_size * agent.view_size * dt;
+            // Vision cost
+            self.agents[i].energy -= self.config.vision_cost
+                * self.agents[i].view_size * self.agents[i].view_size * dt;
 
-            // Energy decay: energy *= decay_rate^dt (e.g. 0.95^0.2 per step for 5%/sec loss)
+            // Energy decay
             if self.config.energy_decay_rate < 1.0 {
-                agent.energy *= self.config.energy_decay_rate.powf(dt);
+                self.agents[i].energy *= self.config.energy_decay_rate.powf(dt);
             }
+
+            // Signal propagation
+            let signal = if signal_prob > 0.5 { 1.0 } else { 0.0 };
+            self.module_graphs[i].propagate_signal(signal);
+
+            // Destroy action (if destroy coords are nonzero)
+            let destroy_pos = Vec2::new(destroy_x, destroy_y);
+            if destroy_pos.magnitude() > 0.1 {
+                if let Some((mod_id, _dist)) = self.module_graphs[i].find_nearest_module(destroy_pos) {
+                    let removed = self.module_graphs[i].destroy_module(mod_id);
+                    // Drop food at each removed module's world position
+                    for pos in removed {
+                        self.foods.push(Food { pos });
+                    }
+                }
+            }
+
+            // Build action
+            if let Some(build_type) = ModuleType::from_index(build_type_idx) {
+                // Check if already building
+                if self.module_graphs[i].pending_builds.is_empty() {
+                    let build_local = Vec2::new(build_x, build_y);
+                    let cost = self.module_graphs[i].build_cost(build_type);
+
+                    if self.agents[i].energy >= cost {
+                        // Find attachment point
+                        if let Some((attach_id, _)) = self.module_graphs[i].find_nearest_free_slot(build_local, radius) {
+                            self.agents[i].energy -= cost;
+                            self.module_graphs[i].pending_builds.push(PendingBuild {
+                                module_type: build_type,
+                                local_pos: build_local,
+                                rotation: build_rot,
+                                length: build_len.clamp(0.1, 1.0),
+                                steps_remaining: build_delay_steps,
+                                attach_to: attach_id,
+                            });
+                        } else {
+                            // No free slot — waste energy
+                            self.agents[i].energy -= 1.0;
+                        }
+                    }
+                }
+            }
+
+            // Tick pending builds
+            let ready_builds = self.module_graphs[i].tick_pending(dt);
+            for pb in ready_builds {
+                // Materialize the build
+                self.module_graphs[i].add_module(
+                    pb.module_type, pb.local_pos, pb.rotation, pb.length, pb.attach_to,
+                );
+            }
+
+            // Update module world positions
+            self.module_graphs[i].update_world_positions(self.agents[i].pos, self.agents[i].rotation);
         }
 
         // 2. Update obstacle positions
@@ -211,23 +319,34 @@ impl Environment {
             self.handle_agent_collisions(radius);
         }
 
-        // 7. Food collection
+        // 8. Food collection (agent body + mouths)
         if self.config.interaction_rules.food_collection {
             self.collect_food(radius);
+            self.collect_food_mouths();
         }
 
-        // 8. Agent death check
-        for agent in &mut self.agents {
-            if !agent.alive {
+        // 9. Agent death check — drop food at module locations on death
+        for i in 0..na {
+            if !self.agents[i].alive {
                 continue;
             }
-            if agent.energy <= 0.0 {
-                agent.dead_steps += 1;
-                if agent.dead_steps >= self.config.dead_steps_threshold {
-                    agent.alive = false;
+            if self.agents[i].energy <= 0.0 {
+                self.agents[i].dead_steps += 1;
+                if self.agents[i].dead_steps >= self.config.dead_steps_threshold {
+                    self.agents[i].alive = false;
+                    // Drop food at agent body position
+                    self.foods.push(Food { pos: self.agents[i].pos });
+                    // Drop food at each alive module position
+                    for m in &self.module_graphs[i].modules {
+                        if m.alive {
+                            self.foods.push(Food { pos: m.world_pos });
+                        }
+                    }
+                    // Clear the module graph
+                    self.module_graphs[i] = ModuleGraph::new();
                 }
             } else {
-                agent.dead_steps = 0;
+                self.agents[i].dead_steps = 0;
             }
         }
 
@@ -495,6 +614,52 @@ impl Environment {
         });
     }
 
+    /// Food collection via mouth modules.
+    fn collect_food_mouths(&mut self) {
+        if self.foods.is_empty() {
+            return;
+        }
+        let mouth_radius = 0.2;
+        let food_radius = self.config.object_radius;
+        let collection_dist = mouth_radius + food_radius;
+
+        let food_positions: Vec<Vec2> = self.foods.iter().map(|f| f.pos).collect();
+        self.spatial.build(&food_positions);
+
+        let mut food_collected = vec![false; self.foods.len()];
+
+        // Collect all mouth positions with their agent index
+        let mut all_mouths: Vec<(usize, Vec2)> = Vec::new();
+        for (ai, mg) in self.module_graphs.iter().enumerate() {
+            if !self.agents[ai].alive {
+                continue;
+            }
+            for pos in mg.alive_mouths() {
+                all_mouths.push((ai, pos));
+            }
+        }
+
+        for (ai, mouth_pos) in all_mouths {
+            let nearby = self.spatial.query_nearby(mouth_pos, collection_dist);
+            for food_idx in nearby {
+                if food_collected[food_idx] {
+                    continue;
+                }
+                if mouth_pos.distance_to(&food_positions[food_idx]) < collection_dist {
+                    self.agents[ai].energy += 1.0;
+                    food_collected[food_idx] = true;
+                }
+            }
+        }
+
+        let mut idx = 0;
+        self.foods.retain(|_| {
+            let keep = !food_collected[idx];
+            idx += 1;
+            keep
+        });
+    }
+
     // ------------------------------------------------------------------
     // Food spawning — dt-independent
     // ------------------------------------------------------------------
@@ -613,6 +778,53 @@ impl Environment {
             }
         }
 
+        // --- Channels 4-11: Modules ---
+        // 4: own_segment, 5: own_gate, 6: own_thruster, 7: own_mouth
+        // 8: other_segment, 9: other_gate, 10: other_thruster, 11: other_mouth
+        let module_r = 0.15; // rendering radius for non-segment modules
+        for (ai, &(pos, vs, alive, _)) in agent_info.iter().enumerate() {
+            if !alive || vs <= 0.0 {
+                continue;
+            }
+            let buf = &mut frame[ai * view_per_agent..(ai + 1) * view_per_agent];
+
+            for (oi, mg) in self.module_graphs.iter().enumerate() {
+                let is_own = oi == ai;
+                for m in &mg.modules {
+                    if !m.alive {
+                        continue;
+                    }
+                    // Check if module is in view
+                    let dx = (m.world_pos.x - pos.x).abs();
+                    let dy = (m.world_pos.y - pos.y).abs();
+                    if dx > vs + 1.0 || dy > vs + 1.0 {
+                        continue;
+                    }
+
+                    let ch = match (is_own, m.module_type) {
+                        (true, ModuleType::Segment) => 4,
+                        (true, ModuleType::Or | ModuleType::And | ModuleType::Xor) => 5,
+                        (true, ModuleType::Thruster) => 6,
+                        (true, ModuleType::Mouth) => 7,
+                        (false, ModuleType::Segment) => 8,
+                        (false, ModuleType::Or | ModuleType::And | ModuleType::Xor) => 9,
+                        (false, ModuleType::Thruster) => 10,
+                        (false, ModuleType::Mouth) => 11,
+                    };
+
+                    if m.module_type == ModuleType::Segment {
+                        // Render segment as a line with width
+                        project_segment_to_view(
+                            m.world_pos, m.world_end, 0.2,
+                            pos, vs, res, buf, nc, ch,
+                        );
+                    } else {
+                        project_to_view(m.world_pos, module_r, pos, vs, res, buf, nc, ch);
+                    }
+                }
+            }
+        }
+
         frame
     }
 
@@ -670,15 +882,15 @@ impl Environment {
         self.agents.iter().map(|a| a.energy).collect()
     }
 
-    /// Returns flat [num_agents * NUM_SCALAR_FEATURES]: energy, vx, vy, view_size.
+    /// Returns flat [num_agents * NUM_SCALAR_FEATURES]: energy, vx, vy, view_size, rotation.
     /// Dead/padded agents get zeros.
     pub fn get_agent_states(&self) -> Vec<f32> {
         let mut states = Vec::with_capacity(self.agents.len() * NUM_SCALAR_FEATURES);
         for a in &self.agents {
             if a.alive {
-                states.extend_from_slice(&[a.energy, a.vel.x, a.vel.y, a.view_size]);
+                states.extend_from_slice(&[a.energy, a.vel.x, a.vel.y, a.view_size, a.rotation]);
             } else {
-                states.extend_from_slice(&[0.0, 0.0, 0.0, 0.0]);
+                states.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0]);
             }
         }
         states
@@ -758,6 +970,57 @@ fn project_to_view(
     }
 }
 
+/// Project a line segment (with width) onto the view grid.
+fn project_segment_to_view(
+    seg_start: Vec2,
+    seg_end: Vec2,
+    width: f32,
+    agent_pos: Vec2,
+    view_size: f32,
+    res: usize,
+    buf: &mut [f32],
+    num_channels: usize,
+    channel: usize,
+) {
+    let view_width = view_size * 2.0;
+    let scale = res as f32 / view_width;
+    let half_w = (width * scale * 0.5).max(0.5);
+
+    // Convert segment endpoints to pixel coords
+    let sx = (seg_start.x - (agent_pos.x - view_size)) * scale;
+    let sy = (seg_start.y - (agent_pos.y - view_size)) * scale;
+    let ex = (seg_end.x - (agent_pos.x - view_size)) * scale;
+    let ey = (seg_end.y - (agent_pos.y - view_size)) * scale;
+
+    // Bounding box of the segment in pixels
+    let min_x = ((sx.min(ex) - half_w).floor() as i32).max(0) as usize;
+    let max_x = ((sx.max(ex) + half_w).ceil() as i32).min(res as i32 - 1).max(0) as usize;
+    let min_y = ((sy.min(ey) - half_w).floor() as i32).max(0) as usize;
+    let max_y = ((sy.max(ey) + half_w).ceil() as i32).min(res as i32 - 1).max(0) as usize;
+
+    // For each pixel in bounding box, check distance to line segment
+    let seg_len_sq = (ex - sx) * (ex - sx) + (ey - sy) * (ey - sy);
+    for row in min_y..=max_y {
+        for col in min_x..=max_x {
+            let px = col as f32;
+            let py = row as f32;
+            // Distance from pixel to line segment
+            let dist = if seg_len_sq < 1e-6 {
+                ((px - sx) * (px - sx) + (py - sy) * (py - sy)).sqrt()
+            } else {
+                let t = ((px - sx) * (ex - sx) + (py - sy) * (ey - sy)) / seg_len_sq;
+                let t = t.clamp(0.0, 1.0);
+                let cx = sx + t * (ex - sx);
+                let cy = sy + t * (ey - sy);
+                ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt()
+            };
+            if dist <= half_w {
+                buf[row * res * num_channels + col * num_channels + channel] = 1.0;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -789,6 +1052,25 @@ mod tests {
         }
     }
 
+    /// Helper: create action slice for n agents. Each tuple is (ax, ay, view_delta).
+    /// Other action dims (signal, destroy, build) default to 0.
+    fn make_actions(agent_actions: &[(f32, f32, f32)]) -> Vec<f32> {
+        let mut actions = Vec::new();
+        for &(ax, ay, vd) in agent_actions {
+            let mut a = vec![0.0f32; NUM_ACTIONS];
+            a[0] = ax;
+            a[1] = ay;
+            a[2] = vd;
+            actions.extend_from_slice(&a);
+        }
+        actions
+    }
+
+    /// Helper: zero actions for n agents.
+    fn zero_actions(n: usize) -> Vec<f32> {
+        vec![0.0f32; n * NUM_ACTIONS]
+    }
+
     #[test]
     fn create_environment() {
         let env = Environment::new(5, test_config(), 42);
@@ -807,7 +1089,7 @@ mod tests {
         let p0 = env.agents[0].pos;
         let p1 = env.agents[1].pos;
 
-        env.step(&[(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]);
+        env.step(&make_actions(&[(0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]));
 
         assert!((env.agents[0].pos.x - p0.x).abs() < 1e-6);
         assert!((env.agents[1].pos.x - p1.x).abs() < 1e-6);
@@ -819,7 +1101,7 @@ mod tests {
         let p0 = env.agents[0].pos;
         let dt = env.config.dt;
 
-        env.step(&[(1.0, 0.0, 0.0)]);
+        env.step(&make_actions(&[(1.0, 0.0, 0.0)]));
 
         assert!((env.agents[0].vel.x - dt).abs() < 1e-6);
         assert!((env.agents[0].pos.x - (p0.x + dt * dt)).abs() < 1e-5);
@@ -831,7 +1113,7 @@ mod tests {
         let dt = env.config.dt;
         let vs0 = env.agents[0].view_size;
 
-        env.step(&[(0.0, 0.0, 5.0)]); // increase view size
+        env.step(&make_actions(&[(0.0, 0.0, 5.0)])); // increase view size
 
         assert!((env.agents[0].view_size - (vs0 + 5.0 * dt)).abs() < 1e-5);
     }
@@ -844,13 +1126,13 @@ mod tests {
 
         // Push view_size way up
         for _ in 0..1000 {
-            env.step(&[(0.0, 0.0, 100.0)]);
+            env.step(&make_actions(&[(0.0, 0.0, 100.0)]));
         }
         assert!(env.agents[0].view_size <= max_vs + 1e-6);
 
         // Push view_size to minimum: max(object_radius, min_view_size)
         for _ in 0..1000 {
-            env.step(&[(0.0, 0.0, -100.0)]);
+            env.step(&make_actions(&[(0.0, 0.0, -100.0)]));
         }
         let min_vs = cfg.object_radius.max(cfg.min_view_size);
         assert!(env.agents[0].view_size >= min_vs - 1e-6);
@@ -864,7 +1146,7 @@ mod tests {
         let mut env = Environment::new(1, cfg, 42);
 
         let e0 = env.agents[0].energy;
-        env.step(&[(0.0, 0.0, 0.0)]);
+        env.step(&make_actions(&[(0.0, 0.0, 0.0)]));
         let e1 = env.agents[0].energy;
 
         // vision_cost * view_size^2 * dt = 1.0 * 2.0^2 * 0.1 = 0.4
@@ -923,7 +1205,7 @@ mod tests {
 
         // Step a few times to build history
         for _ in 0..5 {
-            env.step(&[(0.0, 0.0, 0.0)]);
+            env.step(&make_actions(&[(0.0, 0.0, 0.0)]));
         }
 
         let obs = env.get_views();
@@ -946,7 +1228,7 @@ mod tests {
         let mut env = Environment::new(0, cfg, 42);
 
         for _ in 0..100 {
-            env.step(&[]);
+            env.step(&zero_actions(0));
         }
         assert!(env.foods.len() <= 10);
     }
@@ -958,7 +1240,7 @@ mod tests {
         let mut env = Environment::new(3, cfg, 42);
 
         for _ in 0..10 {
-            env.step(&[(1.0, 1.0, 1.0), (0.0, 0.0, 0.0), (-1.0, -1.0, -1.0)]);
+            env.step(&make_actions(&[(1.0, 1.0, 1.0), (0.0, 0.0, 0.0), (-1.0, -1.0, -1.0)]));
         }
 
         env.reset();
