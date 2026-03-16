@@ -239,27 +239,43 @@ impl Environment {
                 }
             }
 
-            // Build action — instant build with 1-second cooldown
+            // Build action — instant build, auto-attach to first free slot
             if self.module_graphs[i].build_cooldown > 0 {
                 self.module_graphs[i].build_cooldown -= 1;
             }
             if let Some(build_type) = ModuleType::from_index(build_type_idx) {
                 if self.module_graphs[i].build_cooldown == 0 {
-                    let build_local = Vec2::new(build_x, build_y);
                     let cost = self.module_graphs[i].build_cost(build_type);
 
                     if self.agents[i].energy >= cost {
-                        if let Some((attach_id, _)) = self.module_graphs[i].find_nearest_free_slot(build_local, radius) {
+                        // Auto-find attachment: try root first, then existing modules
+                        let attach_id = self.module_graphs[i].find_any_free_slot();
+                        if let Some(attach_id) = attach_id {
+                            // Position: offset from attachment point along build_rotation
+                            let attach_pos = if attach_id == ROOT_ID {
+                                Vec2::zero()
+                            } else if let Some(m) = self.module_graphs[i].get(attach_id) {
+                                if m.module_type == ModuleType::Segment {
+                                    m.segment_end_local()
+                                } else {
+                                    m.local_pos
+                                }
+                            } else {
+                                Vec2::zero()
+                            };
+                            let build_local = Vec2::new(
+                                attach_pos.x + build_len.clamp(0.1, 1.0) * build_rot.cos(),
+                                attach_pos.y + build_len.clamp(0.1, 1.0) * build_rot.sin(),
+                            );
+
                             self.agents[i].energy -= cost;
                             self.module_graphs[i].add_module(
                                 build_type, build_local, build_rot,
                                 build_len.clamp(0.1, 1.0), attach_id,
                             );
-                            // 1-second cooldown
                             self.module_graphs[i].build_cooldown = (1.0 / dt).ceil() as u32;
-                        } else {
-                            self.agents[i].energy -= 1.0;
                         }
+                        // No penalty for no free slot — just skip
                     }
                 }
             }
