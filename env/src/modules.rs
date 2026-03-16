@@ -167,6 +167,10 @@ pub struct ModuleGraph {
     pub pending_builds: Vec<PendingBuild>,
     /// Count of each module type built (for quadratic energy cost).
     pub type_counts: [usize; 7], // indexed by ModuleType::to_index()
+    /// Cooldown timer: steps remaining before next build allowed.
+    pub build_cooldown: u32,
+    /// Number of free modules per type (first N are free).
+    pub free_modules_per_type: usize,
 }
 
 /// Sentinel value representing the agent body (root node).
@@ -179,6 +183,8 @@ impl ModuleGraph {
             root_connections: Vec::new(),
             pending_builds: Vec::new(),
             type_counts: [0; 7],
+            build_cooldown: 0,
+            free_modules_per_type: 2,
         }
     }
 
@@ -555,10 +561,15 @@ impl ModuleGraph {
     }
 
     /// Energy cost to build the next module of a given type.
-    /// Cost = type_count^2 (first is free: 0^2=0, second: 1^2=1, third: 2^2=4, ...).
+    /// First `free_modules_per_type` are free. After that, cost = (count - free)^2.
     pub fn build_cost(&self, module_type: ModuleType) -> f32 {
         let count = self.type_counts[module_type.to_index()];
-        (count * count) as f32
+        if count < self.free_modules_per_type {
+            0.0
+        } else {
+            let paid = count - self.free_modules_per_type;
+            ((paid + 1) * (paid + 1)) as f32
+        }
     }
 
     /// Tick pending builds. Returns list of builds ready to materialize.
@@ -699,13 +710,16 @@ mod tests {
     }
 
     #[test]
-    fn build_cost_quadratic() {
+    fn build_cost_with_free_modules() {
         let mut g = ModuleGraph::new();
+        // First 2 are free (free_modules_per_type = 2)
         assert_eq!(g.build_cost(ModuleType::Segment), 0.0); // first free
         g.add_module(ModuleType::Segment, Vec2::new(0.3, 0.0), 0.0, 0.8, ROOT_ID);
-        assert_eq!(g.build_cost(ModuleType::Segment), 1.0); // second costs 1
+        assert_eq!(g.build_cost(ModuleType::Segment), 0.0); // second still free
         g.add_module(ModuleType::Segment, Vec2::new(-0.3, 0.0), 0.0, 0.8, ROOT_ID);
-        assert_eq!(g.build_cost(ModuleType::Segment), 4.0); // third costs 4
+        assert_eq!(g.build_cost(ModuleType::Segment), 1.0); // third costs 1 (1^2)
+        g.add_module(ModuleType::Segment, Vec2::new(0.0, 0.3), 1.57, 0.8, ROOT_ID);
+        assert_eq!(g.build_cost(ModuleType::Segment), 4.0); // fourth costs 4 (2^2)
 
         // Different type is independent
         assert_eq!(g.build_cost(ModuleType::Mouth), 0.0); // first mouth free

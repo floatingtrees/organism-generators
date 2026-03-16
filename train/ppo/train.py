@@ -39,21 +39,21 @@ class PPOConfig:
     num_agents: int = 20
     env_width: float = 30.0
     env_height: float = 30.0
-    food_spawn_rate: float = 100.0
+    food_spawn_rate: float = 30.0   # reduced to make mouths valuable
     dt: float = 0.15
     energy_loss: float = 0.02
     num_obstacles: int = 3
     obstacle_radius: float = 3.0
     obstacle_weight: float = 50.0
     wall_velocity_damping: float = 0.5
-    food_cap: int = 200  # 75% reduction from 800
+    food_cap: int = 80
     vision_cost: float = 0.001
     initial_view_size: float = 3.0
     min_view_size: float = 2.0
     object_radius: float = 0.3
     energy_decay_rate: float = 1.0
     memory_decay_rate: float = 0.99
-    reset_interval: int = 256
+    reset_interval: int = 10000
 
     # PPO
     train_time: float = 600.0

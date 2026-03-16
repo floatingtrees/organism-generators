@@ -203,8 +203,8 @@ impl Environment {
             self.agents[i].vel.x += tfx * dt;
             self.agents[i].vel.y += tfy * dt;
             self.agents[i].angular_velocity += torque * dt;
-            // Dampen angular velocity slightly
-            self.agents[i].angular_velocity *= 0.98;
+            // Angular velocity decay: 10% per second → factor = 0.9^dt
+            self.agents[i].angular_velocity *= (0.9f32).powf(dt);
 
             // View size update
             let min_vs_val = radius.max(self.config.min_view_size);
@@ -239,40 +239,29 @@ impl Environment {
                 }
             }
 
-            // Build action
+            // Build action — instant build with 1-second cooldown
+            if self.module_graphs[i].build_cooldown > 0 {
+                self.module_graphs[i].build_cooldown -= 1;
+            }
             if let Some(build_type) = ModuleType::from_index(build_type_idx) {
-                // Check if already building
-                if self.module_graphs[i].pending_builds.is_empty() {
+                if self.module_graphs[i].build_cooldown == 0 {
                     let build_local = Vec2::new(build_x, build_y);
                     let cost = self.module_graphs[i].build_cost(build_type);
 
                     if self.agents[i].energy >= cost {
-                        // Find attachment point
                         if let Some((attach_id, _)) = self.module_graphs[i].find_nearest_free_slot(build_local, radius) {
                             self.agents[i].energy -= cost;
-                            self.module_graphs[i].pending_builds.push(PendingBuild {
-                                module_type: build_type,
-                                local_pos: build_local,
-                                rotation: build_rot,
-                                length: build_len.clamp(0.1, 1.0),
-                                steps_remaining: build_delay_steps,
-                                attach_to: attach_id,
-                            });
+                            self.module_graphs[i].add_module(
+                                build_type, build_local, build_rot,
+                                build_len.clamp(0.1, 1.0), attach_id,
+                            );
+                            // 1-second cooldown
+                            self.module_graphs[i].build_cooldown = (1.0 / dt).ceil() as u32;
                         } else {
-                            // No free slot — waste energy
                             self.agents[i].energy -= 1.0;
                         }
                     }
                 }
-            }
-
-            // Tick pending builds
-            let ready_builds = self.module_graphs[i].tick_pending(dt);
-            for pb in ready_builds {
-                // Materialize the build
-                self.module_graphs[i].add_module(
-                    pb.module_type, pb.local_pos, pb.rotation, pb.length, pb.attach_to,
-                );
             }
 
             // Update module world positions
@@ -1282,16 +1271,10 @@ mod tests {
         actions[10] = 1.0; // build_type = segment
 
         env.step(&actions);
-        // Should have a pending build
-        assert_eq!(env.module_graphs[0].pending_builds.len(), 1);
-        assert_eq!(env.module_graphs[0].alive_count(), 0);
-
-        // Step enough for build to materialize (~1s / 0.1dt = 10 steps)
-        for _ in 0..12 {
-            env.step(&zero_actions(1));
-        }
+        // Instant build — should be materialized immediately
         assert_eq!(env.module_graphs[0].alive_count(), 1);
-        assert!(env.module_graphs[0].pending_builds.is_empty());
+        // Cooldown should be active
+        assert!(env.module_graphs[0].build_cooldown > 0);
     }
 
     #[test]
@@ -1300,15 +1283,12 @@ mod tests {
         cfg.food_spawn_rate = 0.0;
         let mut env = Environment::new(1, cfg, 42);
 
-        // Build a segment and let it materialize
+        // Build a segment (instant)
         let mut actions = zero_actions(1);
         actions[6] = 0.5;
         actions[9] = 0.5;
         actions[10] = 1.0;
         env.step(&actions);
-        for _ in 0..12 {
-            env.step(&zero_actions(1));
-        }
         assert_eq!(env.module_graphs[0].alive_count(), 1);
         let food_before = env.foods.len();
 
@@ -1319,7 +1299,7 @@ mod tests {
         env.step(&destroy_actions);
 
         assert_eq!(env.module_graphs[0].alive_count(), 0);
-        assert!(env.foods.len() > food_before); // food dropped
+        assert!(env.foods.len() > food_before);
     }
 
     #[test]
@@ -1350,15 +1330,12 @@ mod tests {
         cfg.dead_steps_threshold = 1;
         let mut env = Environment::new(1, cfg, 42);
 
-        // Build a segment
+        // Build a segment (instant)
         let mut actions = zero_actions(1);
         actions[6] = 0.5;
         actions[9] = 0.5;
         actions[10] = 1.0;
         env.step(&actions);
-        for _ in 0..12 {
-            env.step(&zero_actions(1));
-        }
         assert_eq!(env.module_graphs[0].alive_count(), 1);
 
         // Kill the agent
@@ -1366,9 +1343,7 @@ mod tests {
         env.step(&zero_actions(1));
 
         assert!(!env.agents[0].alive);
-        // Should have dropped food: 1 for body + 1 for module = 2
-        assert!(env.foods.len() >= 2);
-        // Module graph should be cleared
+        assert!(env.foods.len() >= 2); // body + module
         assert_eq!(env.module_graphs[0].alive_count(), 0);
     }
 
@@ -1397,18 +1372,37 @@ mod tests {
         cfg.food_spawn_rate = 0.0;
         let mut env = Environment::new(1, cfg, 42);
 
-        // Build a segment
         let mut actions = zero_actions(1);
         actions[6] = 0.5;
         actions[9] = 0.5;
         actions[10] = 1.0;
         env.step(&actions);
-        for _ in 0..12 {
-            env.step(&zero_actions(1));
-        }
         assert_eq!(env.module_graphs[0].alive_count(), 1);
 
         env.reset();
         assert_eq!(env.module_graphs[0].alive_count(), 0);
+    }
+
+    #[test]
+    fn build_cooldown_prevents_rapid_building() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // First build succeeds
+        let mut actions = zero_actions(1);
+        actions[6] = 0.5;
+        actions[9] = 0.5;
+        actions[10] = 1.0;
+        env.step(&actions);
+        assert_eq!(env.module_graphs[0].alive_count(), 1);
+
+        // Second build on next step should fail (cooldown)
+        let mut actions2 = zero_actions(1);
+        actions2[6] = -0.5;
+        actions2[9] = 0.5;
+        actions2[10] = 1.0;
+        env.step(&actions2);
+        assert_eq!(env.module_graphs[0].alive_count(), 1); // still 1, second build blocked
     }
 }
