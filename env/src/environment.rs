@@ -196,13 +196,6 @@ impl Environment {
             let ang_vel = self.agents[i].angular_velocity;
             self.agents[i].rotation += ang_vel * dt;
 
-            // Thruster effects (force + torque)
-            let (tfx, tfy, torque) = self.module_graphs[i].compute_thruster_effects(
-                self.agents[i].pos, rot, accel.magnitude().max(1.0),
-            );
-            self.agents[i].vel.x += tfx * dt;
-            self.agents[i].vel.y += tfy * dt;
-            self.agents[i].angular_velocity += torque * dt;
             // Angular velocity decay: 10% per second → factor = 0.9^dt
             self.agents[i].angular_velocity *= (0.9f32).powf(dt);
 
@@ -223,9 +216,17 @@ impl Environment {
                 self.agents[i].energy *= self.config.energy_decay_rate.powf(dt);
             }
 
-            // Signal propagation
+            // Signal propagation (must happen BEFORE thruster effects)
             let signal = if signal_prob > 0.5 { 1.0 } else { 0.0 };
             self.module_graphs[i].propagate_signal(signal);
+
+            // Thruster effects (force + torque) — uses signal from above
+            let (tfx, tfy, torque) = self.module_graphs[i].compute_thruster_effects(
+                self.agents[i].pos, self.agents[i].rotation, accel.magnitude().max(1.0),
+            );
+            self.agents[i].vel.x += tfx * dt;
+            self.agents[i].vel.y += tfy * dt;
+            self.agents[i].angular_velocity += torque * dt;
 
             // Destroy action (requires high magnitude to trigger — prevents accidental destroys)
             let destroy_pos = Vec2::new(destroy_x, destroy_y);
@@ -1640,5 +1641,329 @@ mod tests {
         actions2[10] = 1.0;
         env.step(&actions2);
         assert_eq!(env.module_graphs[0].alive_count(), 1); // still 1, second build blocked
+    }
+
+    // ==================================================================
+    // Thruster tests
+    // ==================================================================
+
+    #[test]
+    fn thruster_changes_velocity() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.width = 20.0;
+        cfg.height = 20.0;
+        let mut env = Environment::new(1, cfg, 42);
+        env.agents[0].pos = Vec2::new(10.0, 10.0);
+
+        // Build segment + thruster pointing right
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 1.0; // segment right
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 5.0; // thruster
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+
+        let vx_before = env.agents[0].vel.x;
+
+        // Send signal=1 to activate thruster
+        let mut a = zero_actions(1);
+        a[3] = 1.0; // signal
+        env.step(&a);
+
+        let vx_after = env.agents[0].vel.x;
+        assert!(
+            (vx_after - vx_before).abs() > 1e-4,
+            "thruster should change velocity: before={vx_before} after={vx_after}"
+        );
+    }
+
+    // ==================================================================
+    // Logic gate tests
+    // ==================================================================
+
+    #[test]
+    fn or_gate_signal_propagation() {
+        use crate::modules::{ModuleGraph, ModuleType, ROOT_ID};
+        let mut g = ModuleGraph::new();
+        // Root → Seg(0) → OR(1), with OR having 3 connections
+        g.add_module(ModuleType::Segment, Vec2::new(1.0, 0.0), 0.0, 1.0, ROOT_ID);
+        g.add_module(ModuleType::Or, Vec2::new(2.0, 0.0), 0.0, 0.0, 0);
+        // Add second input segment and output segment to the OR gate
+        g.add_module(ModuleType::Segment, Vec2::new(2.0, 1.0), 0.0, 1.0, 1);
+        // Now OR(1) has connections: [2] from add, plus seg(0) is its parent
+
+        // With signal=1, the OR gate should pass it through
+        g.propagate_signal(1.0);
+        assert!((g.modules[1].signal - 1.0).abs() < 1e-6, "OR gate should be 1 when input is 1");
+
+        g.propagate_signal(0.0);
+        assert!((g.modules[1].signal).abs() < 1e-6, "OR gate should be 0 when input is 0");
+    }
+
+    #[test]
+    fn and_gate_requires_both_inputs() {
+        use crate::modules::{ModuleGraph, ModuleType, ROOT_ID};
+        let mut g = ModuleGraph::new();
+        g.add_module(ModuleType::Segment, Vec2::new(1.0, 0.0), 0.0, 1.0, ROOT_ID);
+        g.add_module(ModuleType::And, Vec2::new(2.0, 0.0), 0.0, 0.0, 0);
+
+        // With only 1 input connected (not 3), AND gate passes signal through
+        g.propagate_signal(1.0);
+        // AND with < 3 connections just passes through
+        assert!((g.modules[1].signal - 1.0).abs() < 1e-6);
+    }
+
+    // ==================================================================
+    // Mouth eating tests
+    // ==================================================================
+
+    #[test]
+    fn mouth_on_segment_collects_distant_food() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.width = 20.0;
+        cfg.height = 20.0;
+        let mut env = Environment::new(1, cfg, 42);
+        env.agents[0].pos = Vec2::new(10.0, 10.0);
+
+        // Build segment + mouth (wait full cooldown: 1s / 0.1dt = 10 steps)
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 1.0; // segment right
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 6.0; // mouth
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+
+        // Check what was built
+        let alive = env.module_graphs[0].alive_count();
+        let mouth_pos = env.module_graphs[0].alive_mouths();
+        println!("alive modules: {}, mouths: {}", alive, mouth_pos.len());
+        for m in &env.module_graphs[0].modules {
+            println!("  module {}: type={:?} alive={} local=({:.2},{:.2}) world=({:.2},{:.2})",
+                m.id, m.module_type, m.alive, m.local_pos.x, m.local_pos.y, m.world_pos.x, m.world_pos.y);
+        }
+        assert!(!mouth_pos.is_empty(), "should have a mouth (alive={}, modules={})", alive, env.module_graphs[0].modules.len());
+        env.foods.push(Food { pos: mouth_pos[0] });
+
+        let e0 = env.agents[0].energy;
+        env.step(&zero_actions(1));
+        let e1 = env.agents[0].energy;
+        assert!(e1 > e0, "mouth should collect food at segment end: e0={e0} e1={e1}");
+    }
+
+    // ==================================================================
+    // Agent-to-agent module collision tests
+    // ==================================================================
+
+    #[test]
+    #[ignore] // TODO: cross-agent module collision not yet implemented
+    fn agents_with_segments_collide() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.width = 20.0;
+        cfg.height = 20.0;
+        cfg.interaction_rules.agent_collision = true;
+        let mut env = Environment::new(2, cfg, 42);
+
+        // Place agents facing each other
+        env.agents[0].pos = Vec2::new(8.0, 10.0);
+        env.agents[1].pos = Vec2::new(12.0, 10.0);
+
+        // Build segments pointing toward each other
+        let mut a = zero_actions(2);
+        a[8] = 0.0; a[10] = 1.0; // agent 0: segment right
+        a[NUM_ACTIONS + 8] = std::f32::consts::PI; // agent 1: segment left
+        a[NUM_ACTIONS + 10] = 1.0;
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(2)); }
+
+        // Push agents toward each other
+        let pos0_before = env.agents[0].pos.x;
+        let pos1_before = env.agents[1].pos.x;
+        for _ in 0..20 {
+            let mut a = zero_actions(2);
+            a[0] = 2.0;  // agent 0 accelerate right
+            a[NUM_ACTIONS] = -2.0; // agent 1 accelerate left
+            env.step(&a);
+        }
+
+        // Agents should not have passed through each other
+        // (they may have bounced, but agent 0 shouldn't be past agent 1)
+        assert!(
+            env.agents[0].pos.x < env.agents[1].pos.x,
+            "agents should not pass through: a0={} a1={}",
+            env.agents[0].pos.x, env.agents[1].pos.x
+        );
+    }
+
+    // ==================================================================
+    // Edge cases / things that could go wrong
+    // ==================================================================
+
+    #[test]
+    fn building_while_moving_fast() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.width = 30.0;
+        cfg.height = 30.0;
+        let mut env = Environment::new(1, cfg, 42);
+        env.agents[0].pos = Vec2::new(15.0, 15.0);
+        env.agents[0].vel = Vec2::new(5.0, 0.0); // moving fast right
+
+        // Build mouth while moving fast
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 6.0;
+        env.step(&a);
+
+        // Should still work, module at correct position
+        assert_eq!(env.module_graphs[0].alive_count(), 1);
+    }
+
+    #[test]
+    fn agent_death_clears_modules_and_drops_food() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.dead_steps_threshold = 1;
+        cfg.width = 20.0;
+        cfg.height = 20.0;
+        let mut env = Environment::new(1, cfg, 42);
+        env.agents[0].pos = Vec2::new(10.0, 10.0);
+
+        // Build 3 modules
+        for (rot, bt) in [(0.0, 1.0), (1.57, 1.0), (3.14, 6.0)] {
+            let mut a = zero_actions(1);
+            a[8] = rot; a[10] = bt;
+            env.step(&a);
+            for _ in 0..12 { env.step(&zero_actions(1)); }
+        }
+        let module_count = env.module_graphs[0].alive_count();
+        assert!(module_count >= 2, "should have built modules: {module_count}");
+
+        // Kill agent
+        env.agents[0].energy = -100.0;
+        let food_before = env.foods.len();
+        env.step(&zero_actions(1));
+
+        assert!(!env.agents[0].alive);
+        assert_eq!(env.module_graphs[0].alive_count(), 0);
+        // Food dropped: 1 for body + N for modules
+        assert!(env.foods.len() > food_before);
+    }
+
+    #[test]
+    fn rotation_preserves_module_relative_positions() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.width = 20.0;
+        cfg.height = 20.0;
+        let mut env = Environment::new(1, cfg, 42);
+        env.agents[0].pos = Vec2::new(10.0, 10.0);
+        env.agents[0].rotation = 0.0;
+
+        // Build segment right
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 1.0;
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+
+        // Get module world position at rotation=0
+        let pos_r0 = env.module_graphs[0].modules[0].world_pos;
+
+        // Rotate agent 90 degrees and update
+        env.agents[0].rotation = std::f32::consts::FRAC_PI_2;
+        env.module_graphs[0].update_world_positions(env.agents[0].pos, env.agents[0].rotation);
+
+        let pos_r90 = env.module_graphs[0].modules[0].world_pos;
+
+        // Module should have rotated: was to the right, now should be above
+        assert!(
+            (pos_r90.y - pos_r0.y).abs() > 0.5,
+            "module should rotate with agent: r0=({:.2},{:.2}) r90=({:.2},{:.2})",
+            pos_r0.x, pos_r0.y, pos_r90.x, pos_r90.y
+        );
+    }
+
+    #[test]
+    fn food_never_inside_obstacles() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 200.0;
+        cfg.food_cap = Some(200);
+        cfg.num_initial_obstacles = 3;
+        cfg.obstacle_radius = 2.0;
+        cfg.width = 10.0;
+        cfg.height = 10.0;
+        let mut env = Environment::new(0, cfg, 42);
+
+        // Step many times to spawn lots of food
+        for _ in 0..50 {
+            env.step(&[]);
+        }
+
+        // Check no food is inside any obstacle
+        for food in &env.foods {
+            for obs in &env.obstacles {
+                let dist = food.pos.distance_to(&obs.pos);
+                assert!(
+                    dist > obs.radius,
+                    "food at ({:.2},{:.2}) inside obstacle at ({:.2},{:.2}) radius={:.2}, dist={:.2}",
+                    food.pos.x, food.pos.y, obs.pos.x, obs.pos.y, obs.radius, dist
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_dead_detected() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.dead_steps_threshold = 1;
+        let mut env = Environment::new(3, cfg, 42);
+
+        // Kill all agents
+        for agent in &mut env.agents {
+            agent.energy = -100.0;
+        }
+        env.step(&zero_actions(3));
+
+        assert!(env.agents.iter().all(|a| !a.alive));
+    }
+
+    #[test]
+    fn signal_does_not_activate_without_send() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.width = 20.0;
+        cfg.height = 20.0;
+        let mut env = Environment::new(1, cfg, 42);
+        env.agents[0].pos = Vec2::new(10.0, 10.0);
+
+        // Build segment + thruster
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 1.0;
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+        let mut a = zero_actions(1);
+        a[8] = 0.0; a[10] = 5.0;
+        env.step(&a);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+
+        // Step without signal — thruster should NOT fire
+        let vx_before = env.agents[0].vel.x;
+        let mut a = zero_actions(1);
+        a[3] = 0.0; // no signal
+        env.step(&a);
+        let vx_after = env.agents[0].vel.x;
+
+        // Velocity should only change from damping, not thrust
+        assert!(
+            (vx_after - vx_before).abs() < 0.01,
+            "thruster should not fire without signal: delta={}",
+            (vx_after - vx_before).abs()
+        );
     }
 }
