@@ -91,41 +91,40 @@ pub fn render_environment(
                         (0.2 * pixels_per_unit).max(2.0), dim_color);
                 }
                 ModuleType::Or => {
-                    // OR gate: curved D-shape (simplified as circle)
                     let px = m.world_pos.x * pixels_per_unit;
                     let py = m.world_pos.y * pixels_per_unit;
-                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    let r = (0.35 * pixels_per_unit).max(5.0);
                     draw_circle(&mut buf, img_w, img_h, px, py, r, [200, 200, 50]);
+                    draw_circle(&mut buf, img_w, img_h, px, py, r * 0.4, [255, 255, 150]);
                 }
                 ModuleType::And => {
-                    // AND gate: D-shape (simplified as filled square)
                     let px = m.world_pos.x * pixels_per_unit;
                     let py = m.world_pos.y * pixels_per_unit;
-                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    let r = (0.35 * pixels_per_unit).max(5.0);
                     draw_rect(&mut buf, img_w, img_h, px, py, r, [50, 200, 200]);
+                    draw_rect(&mut buf, img_w, img_h, px, py, r * 0.4, [150, 255, 255]);
                 }
                 ModuleType::Xor => {
-                    // XOR gate: diamond
                     let px = m.world_pos.x * pixels_per_unit;
                     let py = m.world_pos.y * pixels_per_unit;
-                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    let r = (0.35 * pixels_per_unit).max(5.0);
                     draw_diamond(&mut buf, img_w, img_h, px, py, r, [200, 50, 200]);
+                    draw_diamond(&mut buf, img_w, img_h, px, py, r * 0.4, [255, 150, 255]);
                 }
                 ModuleType::Thruster => {
-                    // Arrow pointing in thrust direction
                     let px = m.world_pos.x * pixels_per_unit;
                     let py = m.world_pos.y * pixels_per_unit;
-                    let r = (0.12 * pixels_per_unit).max(3.0);
+                    let r = (0.35 * pixels_per_unit).max(5.0);
                     draw_triangle(&mut buf, img_w, img_h, px, py, r,
                         m.rotation + env.agents[agent.id].rotation, [255, 100, 50]);
                 }
                 ModuleType::Mouth => {
-                    // Star shape
+                    // Circle matching collection radius (0.5)
                     let px = m.world_pos.x * pixels_per_unit;
                     let py = m.world_pos.y * pixels_per_unit;
-                    let r = (0.15 * pixels_per_unit).max(3.0);
+                    let r = (0.5 * pixels_per_unit).max(3.0);
                     draw_circle(&mut buf, img_w, img_h, px, py, r, [50, 255, 100]);
-                    draw_circle(&mut buf, img_w, img_h, px, py, r * 0.5, [255, 255, 255]);
+                    draw_circle(&mut buf, img_w, img_h, px, py, r * 0.4, [255, 255, 255]);
                 }
             }
         }
