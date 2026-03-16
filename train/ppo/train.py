@@ -403,69 +403,67 @@ def inference_loop(
 # ---------------------------------------------------------------------------
 
 
-def evaluate_memory(model: ActorCritic, cfg: PPOConfig, num_episodes: int = 5):
+def evaluate_memory(model: ActorCritic, cfg: PPOConfig, num_episodes: int = 30):
     """Run episodes with and without memory to check if the agent uses it.
 
-    Returns (mean_return_with_memory, mean_return_without_memory).
+    Returns (mean_with, mean_without, p_value).
+    Uses a two-sample t-test for statistical significance.
     """
+    from scipy import stats
     device = cfg.device
     model.eval()
 
-    def run_episodes(use_memory: bool) -> float:
-        eval_env = organism_env.EvolutionEnv.initialize({
-            "num_organisms": cfg.num_agents,
-            "height": cfg.env_height, "width": cfg.env_width,
-            "food_spawn_rate": cfg.food_spawn_rate, "num_copies": 1,
-            "dt": cfg.dt, "energy_loss": cfg.energy_loss,
-            "wall_velocity_damping": cfg.wall_velocity_damping,
-            "object_radius": cfg.object_radius,
-            "num_obstacles": cfg.num_obstacles,
-            "obstacle_radius": cfg.obstacle_radius,
-            "obstacle_weight": cfg.obstacle_weight,
-            "food_cap": cfg.food_cap, "vision_cost": cfg.vision_cost,
-            "initial_view_size": cfg.initial_view_size,
-            "min_view_size": cfg.min_view_size,
-            "energy_decay_rate": cfg.energy_decay_rate,
-            "rules": {"agent_collision": cfg.agent_collision},
-        })
+    eval_env = organism_env.EvolutionEnv.initialize({
+        "num_organisms": cfg.num_agents,
+        "height": cfg.env_height, "width": cfg.env_width,
+        "food_spawn_rate": cfg.food_spawn_rate, "num_copies": 1,
+        "dt": cfg.dt, "energy_loss": cfg.energy_loss,
+        "wall_velocity_damping": cfg.wall_velocity_damping,
+        "object_radius": cfg.object_radius,
+        "num_obstacles": cfg.num_obstacles,
+        "obstacle_radius": cfg.obstacle_radius,
+        "obstacle_weight": cfg.obstacle_weight,
+        "food_cap": cfg.food_cap, "vision_cost": cfg.vision_cost,
+        "initial_view_size": cfg.initial_view_size,
+        "min_view_size": cfg.min_view_size,
+        "energy_decay_rate": cfg.energy_decay_rate,
+        "rules": {"agent_collision": cfg.agent_collision},
+    })
+    factor = cfg.memory_decay_rate ** cfg.dt
 
-        ep_returns = []
-        factor = cfg.memory_decay_rate ** cfg.dt
+    def run_one_episode(use_memory: bool) -> float:
+        eval_env.reset()
+        obs, scalars, alive = env_observe(eval_env, device)
+        memory = torch.zeros(cfg.num_agents, MEMORY_DIM, device=device)
+        total_reward = 0.0
+        prev_e = alive * 10.0
 
         with torch.no_grad():
-            for _ in range(num_episodes):
-                eval_env.reset()
+            for step in range(cfg.reset_interval):
+                action, _, _, _, mem_out = model.get_action_and_value(obs, scalars, memory)
+                if use_memory:
+                    memory = memory * factor + (1 - factor) * mem_out
+
+                act_np = action.reshape(1, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
+                energy_np = eval_env.step(act_np)
+                energy = torch.from_numpy(energy_np).reshape(-1).to(device)
                 obs, scalars, alive = env_observe(eval_env, device)
-                memory = torch.zeros(cfg.num_agents, MEMORY_DIM, device=device)
-                total_reward = 0.0
-                prev_e = alive * 10.0
 
-                for step in range(cfg.reset_interval):
-                    action, _, _, _, mem_out = model.get_action_and_value(obs, scalars, memory)
+                reward = ((energy - prev_e) * alive).sum().item()
+                prev_e = energy.clone()
+                total_reward += reward
 
-                    if use_memory:
-                        memory = memory * factor + (1 - factor) * mem_out
-                    # else: memory stays zero — agent gets no memory
+                if eval_env.all_dead():
+                    break
 
-                    act_np = action.reshape(1, cfg.num_agents, NUM_ACTIONS).cpu().numpy()
-                    energy_np = eval_env.step(act_np)
-                    energy = torch.from_numpy(energy_np).reshape(-1).to(device)
-                    obs, scalars, alive = env_observe(eval_env, device)
+        return total_reward / cfg.num_agents
 
-                    reward = ((energy - prev_e) * alive).sum().item()
-                    prev_e = energy.clone()
-                    total_reward += reward
-
-                    if eval_env.all_dead():
-                        break
-
-                ep_returns.append(total_reward / cfg.num_agents)
-
-        return np.mean(ep_returns)
-
-    ret_with = run_episodes(use_memory=True)
-    ret_without = run_episodes(use_memory=False)
-    return ret_with, ret_without
+    returns_with = [run_one_episode(use_memory=True) for _ in range(num_episodes)]
+    returns_without = [run_one_episode(use_memory=False) for _ in range(num_episodes)]
+    mean_with = np.mean(returns_with)
+    mean_without = np.mean(returns_without)
+    t_stat, p_value = stats.ttest_ind(returns_with, returns_without)
+    return mean_with, mean_without, p_value
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +687,9 @@ def train(cfg: PPOConfig):
             vpath = f"train/ppo/videos/checkpoint_{video_count:03d}_step{global_step}.mp4"
             print(f"  Generating video checkpoint {video_count}...")
             inference_loop(model=agent, cfg=cfg, output_path=vpath)
+            # Evaluate memory vs no-memory
+            rw, rwo, pv = evaluate_memory(agent, cfg, num_episodes=15)
+            print(f"  Memory eval: with={rw:+.2f} without={rwo:+.2f} delta={rw-rwo:+.2f} p={pv:.4f}")
             last_video_time = time.time()
 
     # --- Save model ---
@@ -699,10 +700,10 @@ def train(cfg: PPOConfig):
 
     # --- Evaluate memory usage ---
     print("\nEvaluating memory reservoir usage...")
-    ret_with, ret_without = evaluate_memory(agent, cfg)
+    ret_with, ret_without, p_val = evaluate_memory(agent, cfg)
     print(f"  With memory:    ep_return = {ret_with:+.2f}")
     print(f"  Without memory: ep_return = {ret_without:+.2f}")
-    print(f"  Delta:          {ret_with - ret_without:+.2f} ({'memory helps' if ret_with > ret_without else 'no benefit yet'})")
+    print(f"  Delta:          {ret_with - ret_without:+.2f} (p={p_val:.4f}, {'significant' if p_val < 0.05 else 'not significant'})")
 
     # --- Generate final video ---
     print("\nGenerating final video...")
