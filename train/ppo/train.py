@@ -66,8 +66,8 @@ class PPOConfig:
     max_grad_norm: float = 0.5
     num_epochs: int = 4
     num_minibatches: int = 4
-    lr: float = 3e-4
-    anneal_lr: bool = True
+    lr: float = 1e-4
+    anneal_lr: bool = False  # disable cosine annealing to preserve learned features on resume
 
     # Misc
     seed: int = 42
@@ -766,7 +766,7 @@ def main():
     parser.add_argument("--num-agents", type=int, default=20)
     parser.add_argument("--train-time", type=float, default=600.0)
     parser.add_argument("--rollout-len", type=int, default=128)
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--num-epochs", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--render-every", type=int, default=100)
