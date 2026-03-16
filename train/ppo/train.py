@@ -18,10 +18,12 @@ import torch.optim as optim
 
 import organism_env
 
-NUM_ACTIONS = 3  # (ax, ay, view_delta)
+NUM_CONTINUOUS_ACTIONS = 10  # ax, ay, view_delta, signal, destroy_x/y, build_x/y/rot/len
+NUM_BUILD_TYPES = 7  # 0=none, 1=segment, 2=OR, 3=AND, 4=XOR, 5=thruster, 6=mouth
+NUM_ACTIONS = NUM_CONTINUOUS_ACTIONS + 1  # +1 for build_type index (passed as float)
 VIEW_RES = 32
-TOTAL_CHANNELS = 16  # 4 object channels × 4 temporal frames
-NUM_SCALAR_FEATURES = 4  # energy, vx, vy, view_size
+TOTAL_CHANNELS = 48  # 12 object channels × 4 temporal frames
+NUM_SCALAR_FEATURES = 5  # energy, vx, vy, view_size, rotation
 MEMORY_DIM = 128
 
 
@@ -145,10 +147,13 @@ class ActorCritic(nn.Module):
             nn.ReLU(),
         )
 
-        self.actor_mean = nn.Linear(fc_hidden, act_dim)
+        # Continuous action head (10 dims: ax, ay, view_delta, signal, destroy_xy, build_xyrl)
+        self.actor_mean = nn.Linear(fc_hidden, NUM_CONTINUOUS_ACTIONS)
+        self.log_std = nn.Parameter(torch.full((NUM_CONTINUOUS_ACTIONS,), -1.0))
+        # Discrete build_type head (7 classes)
+        self.build_type_head = nn.Linear(fc_hidden, NUM_BUILD_TYPES)
         self.critic_head = nn.Linear(fc_hidden, 1)
         self.memory_head = nn.Linear(fc_hidden, memory_dim)
-        self.log_std = nn.Parameter(torch.full((act_dim,), -1.0))
 
         # Init
         for m in self.modules():
@@ -157,9 +162,10 @@ class ActorCritic(nn.Module):
                 nn.init.zeros_(m.bias)
         nn.init.orthogonal_(self.actor_mean.weight, gain=0.01)
         nn.init.zeros_(self.actor_mean.bias)
+        nn.init.orthogonal_(self.build_type_head.weight, gain=0.01)
+        nn.init.zeros_(self.build_type_head.bias)
         nn.init.orthogonal_(self.critic_head.weight, gain=1.0)
         nn.init.zeros_(self.critic_head.bias)
-        # Memory head starts near zero so initial memory writes are small
         nn.init.orthogonal_(self.memory_head.weight, gain=0.01)
         nn.init.zeros_(self.memory_head.bias)
 
@@ -173,21 +179,39 @@ class ActorCritic(nn.Module):
 
     def get_action_and_value(
         self, obs: torch.Tensor, scalars: torch.Tensor, memory_in: torch.Tensor,
-        action: torch.Tensor | None = None
+        action: torch.Tensor | None = None, build_type: torch.Tensor | None = None,
     ):
         h = self._encode(obs, scalars, memory_in)
+
+        # Continuous actions
         mean = self.actor_mean(h)
         std = self.log_std.exp()
-        dist = torch.distributions.Normal(mean, std)
+        cont_dist = torch.distributions.Normal(mean, std)
+
+        # Discrete build_type
+        build_logits = self.build_type_head(h)
+        build_dist = torch.distributions.Categorical(logits=build_logits)
 
         if action is None:
-            action = dist.sample()
+            action = cont_dist.sample()
+        if build_type is None:
+            build_type = build_dist.sample()
 
-        log_prob = dist.log_prob(action).sum(-1)
-        entropy = dist.entropy().sum(-1)
+        cont_log_prob = cont_dist.log_prob(action).sum(-1)
+        build_log_prob = build_dist.log_prob(build_type)
+        log_prob = cont_log_prob + build_log_prob
+
+        cont_entropy = cont_dist.entropy().sum(-1)
+        build_entropy = build_dist.entropy()
+        entropy = cont_entropy + build_entropy
+
         value = self.critic_head(h).squeeze(-1)
         memory_out = self.memory_head(h)
-        return action, log_prob, entropy, value, memory_out
+
+        # Combine into full action vector for env: [continuous..., build_type_index]
+        full_action = torch.cat([action, build_type.unsqueeze(-1).float()], dim=-1)
+
+        return full_action, log_prob, entropy, value, memory_out
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +270,10 @@ class RolloutBuffer:
         obs = self.obs.reshape(total, VIEW_RES, VIEW_RES, TOTAL_CHANNELS)
         scalars = self.scalars.reshape(total, NUM_SCALAR_FEATURES)
         memory = self.memory.reshape(total, MEMORY_DIM)
-        actions = self.actions.reshape(total, -1)
+        all_actions = self.actions.reshape(total, -1)
+        # Split into continuous and discrete
+        cont_actions = all_actions[:, :NUM_CONTINUOUS_ACTIONS]
+        build_types = all_actions[:, NUM_CONTINUOUS_ACTIONS].long()
         log_probs = self.log_probs.reshape(total)
         advantages = self.advantages.reshape(total)
         returns = self.returns.reshape(total)
@@ -257,7 +284,8 @@ class RolloutBuffer:
 
         for start in range(0, total, mb_size):
             idx = indices[start : start + mb_size]
-            yield (obs[idx], scalars[idx], memory[idx], actions[idx],
+            yield (obs[idx], scalars[idx], memory[idx],
+                   cont_actions[idx], build_types[idx],
                    log_probs[idx], advantages[idx], returns[idx], alive[idx])
 
 
@@ -600,12 +628,14 @@ def train(cfg: PPOConfig):
         num_batches = 0
 
         for epoch in range(cfg.num_epochs):
-            for mb_obs, mb_scalars, mb_mem, mb_act, mb_old_lp, mb_adv, mb_ret, mb_alive in buf.get_batches(
+            for mb_obs, mb_scalars, mb_mem, mb_cont_act, mb_build_type, mb_old_lp, mb_adv, mb_ret, mb_alive in buf.get_batches(
                 cfg.num_minibatches
             ):
                 # NOTE: mb_mem is already detached (stored detached in buffer)
                 # No gradient flows through memory across steps
-                _, new_lp, entropy, new_val, _ = agent.get_action_and_value(mb_obs, mb_scalars, mb_mem, mb_act)
+                _, new_lp, entropy, new_val, _ = agent.get_action_and_value(
+                    mb_obs, mb_scalars, mb_mem, mb_cont_act, mb_build_type
+                )
 
                 # Normalize advantages over alive agents
                 alive_mask = mb_alive > 0
