@@ -66,7 +66,22 @@ Physics per step:
 
 Save a PNG image of a single environment to `filepath`.
 
-- Food: green circles
+- Food: small green filled circles
+- Agents: colored dots with white center marker, dashed view-size circle
+- Obstacles: large gray filled circles
+
+### Module rendering (in video/PNG)
+
+| Module | Shape | Color | Description |
+|--------|-------|-------|-------------|
+| Segment | Thick line/rectangle | Agent color (dimmed) | Connects modules, length 1.0, width 0.2 |
+| Mouth | Large circle + white center | Green (#32FF64) | Collects food within 0.5 radius |
+| OR gate | Circle + light inner | Yellow (#C8C832) | Outputs 1 if either input is 1 |
+| AND gate | Square + light inner | Cyan (#32C8C8) | Outputs 1 if both inputs are 1 |
+| XOR gate | Diamond + light inner | Magenta (#C832C8) | Outputs 1 if exactly one input is 1 |
+| Thruster | Triangle pointing in thrust dir | Orange (#FF6432) | Applies force when receiving signal |
+
+In the 32×32 agent observation, modules appear as dots on dedicated channels (own vs other).
 - Agents: distinct hue per agent with white center marker
 - Obstacles: gray circles
 - Dead agents: dark red

@@ -264,22 +264,46 @@ impl Environment {
                             } else {
                                 Vec2::zero()
                             };
-                            let module_offset = if build_type == ModuleType::Segment { seg_len } else { 0.3 };
+                            // Non-segments offset further to avoid sitting on body
+                            let module_offset = if build_type == ModuleType::Segment { seg_len } else { 0.5 };
                             let build_local = Vec2::new(
                                 attach_pos.x + module_offset * build_rot.cos(),
                                 attach_pos.y + module_offset * build_rot.sin(),
                             );
 
-                            // Self-collision check: new module must not overlap existing modules
-                            // (body overlap is OK for direct root attachments)
+                            // Self-collision: must not overlap existing own modules
                             let min_clearance = 0.25;
                             let self_collision = self.module_graphs[i].modules.iter().any(|m| {
                                 if !m.alive { return false; }
-                                let d = m.local_pos.distance_to(&build_local);
-                                d < min_clearance
+                                m.local_pos.distance_to(&build_local) < min_clearance
                             });
 
-                            if !self_collision {
+                            // World-space checks: compute where this module would be
+                            let agent_rot = self.agents[i].rotation;
+                            let cos_r = agent_rot.cos();
+                            let sin_r = agent_rot.sin();
+                            let world_pos = Vec2::new(
+                                self.agents[i].pos.x + build_local.x * cos_r - build_local.y * sin_r,
+                                self.agents[i].pos.y + build_local.x * sin_r + build_local.y * cos_r,
+                            );
+
+                            // Check world boundaries (for segments, also check endpoint)
+                            let mut oob = world_pos.x < radius || world_pos.x > self.config.width - radius
+                                || world_pos.y < radius || world_pos.y > self.config.height - radius;
+                            if build_type == ModuleType::Segment {
+                                let world_rot = build_rot + agent_rot;
+                                let end_x = world_pos.x + seg_len * world_rot.cos();
+                                let end_y = world_pos.y + seg_len * world_rot.sin();
+                                oob = oob || end_x < radius || end_x > self.config.width - radius
+                                    || end_y < radius || end_y > self.config.height - radius;
+                            }
+
+                            // Check obstacle overlap
+                            let in_obstacle = self.obstacles.iter().any(|o| {
+                                world_pos.distance_to(&o.pos) < o.radius + 0.3
+                            });
+
+                            if !self_collision && !oob && !in_obstacle {
                                 self.agents[i].energy -= cost;
                                 self.module_graphs[i].add_module(
                                     build_type, build_local, build_rot,
@@ -702,11 +726,23 @@ impl Environment {
         }
         let r = self.config.object_radius;
         for _ in 0..total {
-            let x = self.rng.gen_range(r..self.config.width - r);
-            let y = self.rng.gen_range(r..self.config.height - r);
-            self.foods.push(Food {
-                pos: Vec2::new(x, y),
-            });
+            // Rejection sample: avoid spawning inside obstacles
+            let mut attempts = 0;
+            loop {
+                let x = self.rng.gen_range(r..self.config.width - r);
+                let y = self.rng.gen_range(r..self.config.height - r);
+                let pos = Vec2::new(x, y);
+                let in_obstacle = self.obstacles.iter().any(|o| {
+                    pos.distance_to(&o.pos) < o.radius + r
+                });
+                if !in_obstacle || attempts > 20 {
+                    if !in_obstacle {
+                        self.foods.push(Food { pos });
+                    }
+                    break;
+                }
+                attempts += 1;
+            }
         }
     }
 
