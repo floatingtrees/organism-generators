@@ -71,6 +71,8 @@ pub struct Agent {
     pub id: usize,
     pub pos: Vec2,
     pub vel: Vec2,
+    pub rotation: f32,        // facing direction in radians
+    pub angular_velocity: f32, // radians per second
     pub energy: f32,
     pub dead_steps: u32,
     pub alive: bool,
@@ -83,6 +85,8 @@ impl Agent {
             id,
             pos,
             vel: Vec2::zero(),
+            rotation: 0.0,
+            angular_velocity: 0.0,
             energy: 10.0,
             dead_steps: 0,
             alive: true,

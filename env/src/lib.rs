@@ -1,5 +1,6 @@
 mod batched_env;
 mod environment;
+mod modules;
 mod rendering;
 mod spatial_hash;
 mod types;
