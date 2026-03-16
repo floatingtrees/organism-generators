@@ -1266,4 +1266,149 @@ mod tests {
             .any(|(a, b)| (a.x - b.x).abs() > 1e-6 || (a.y - b.y).abs() > 1e-6);
         assert!(any_different);
     }
+
+    #[test]
+    fn build_segment_action() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Build a segment: build_type=1 (segment), build_x=0.5, build_len=0.8
+        let mut actions = zero_actions(1);
+        actions[6] = 0.5;  // build_x
+        actions[7] = 0.0;  // build_y
+        actions[8] = 0.0;  // build_rotation
+        actions[9] = 0.8;  // build_length
+        actions[10] = 1.0; // build_type = segment
+
+        env.step(&actions);
+        // Should have a pending build
+        assert_eq!(env.module_graphs[0].pending_builds.len(), 1);
+        assert_eq!(env.module_graphs[0].alive_count(), 0);
+
+        // Step enough for build to materialize (~1s / 0.1dt = 10 steps)
+        for _ in 0..12 {
+            env.step(&zero_actions(1));
+        }
+        assert_eq!(env.module_graphs[0].alive_count(), 1);
+        assert!(env.module_graphs[0].pending_builds.is_empty());
+    }
+
+    #[test]
+    fn destroy_drops_food() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Build a segment and let it materialize
+        let mut actions = zero_actions(1);
+        actions[6] = 0.5;
+        actions[9] = 0.5;
+        actions[10] = 1.0;
+        env.step(&actions);
+        for _ in 0..12 {
+            env.step(&zero_actions(1));
+        }
+        assert_eq!(env.module_graphs[0].alive_count(), 1);
+        let food_before = env.foods.len();
+
+        // Destroy it
+        let mut destroy_actions = zero_actions(1);
+        destroy_actions[4] = 0.5; // destroy_x
+        destroy_actions[5] = 0.0; // destroy_y
+        env.step(&destroy_actions);
+
+        assert_eq!(env.module_graphs[0].alive_count(), 0);
+        assert!(env.foods.len() > food_before); // food dropped
+    }
+
+    #[test]
+    fn local_frame_acceleration() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Set agent rotation to 90 degrees (facing up)
+        env.agents[0].rotation = std::f32::consts::FRAC_PI_2;
+        let p0 = env.agents[0].pos;
+
+        // Accelerate "forward" in local frame (ax=1, ay=0)
+        // In world frame, this should move in +y direction
+        env.step(&make_actions(&[(1.0, 0.0, 0.0)]));
+
+        let p1 = env.agents[0].pos;
+        let dy = p1.y - p0.y;
+        let dx = p1.x - p0.x;
+        // Movement should be primarily in +y
+        assert!(dy.abs() > dx.abs() * 5.0, "dy={dy}, dx={dx}");
+    }
+
+    #[test]
+    fn death_drops_food_at_modules() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        cfg.dead_steps_threshold = 1;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Build a segment
+        let mut actions = zero_actions(1);
+        actions[6] = 0.5;
+        actions[9] = 0.5;
+        actions[10] = 1.0;
+        env.step(&actions);
+        for _ in 0..12 {
+            env.step(&zero_actions(1));
+        }
+        assert_eq!(env.module_graphs[0].alive_count(), 1);
+
+        // Kill the agent
+        env.agents[0].energy = -100.0;
+        env.step(&zero_actions(1));
+
+        assert!(!env.agents[0].alive);
+        // Should have dropped food: 1 for body + 1 for module = 2
+        assert!(env.foods.len() >= 2);
+        // Module graph should be cleared
+        assert_eq!(env.module_graphs[0].alive_count(), 0);
+    }
+
+    #[test]
+    fn observation_has_48_channels() {
+        let cfg = test_config();
+        let env = Environment::new(2, cfg, 42);
+        let obs = env.get_views();
+        // 2 agents * 8 * 8 * 48 channels
+        assert_eq!(obs.len(), 2 * 8 * 8 * TOTAL_VIEW_CHANNELS);
+    }
+
+    #[test]
+    fn scalar_states_include_rotation() {
+        let cfg = test_config();
+        let env = Environment::new(1, cfg, 42);
+        let states = env.get_agent_states();
+        assert_eq!(states.len(), NUM_SCALAR_FEATURES); // 5 features
+        // rotation should be 0 initially
+        assert!((states[4]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn module_graph_cleared_on_reset() {
+        let mut cfg = test_config();
+        cfg.food_spawn_rate = 0.0;
+        let mut env = Environment::new(1, cfg, 42);
+
+        // Build a segment
+        let mut actions = zero_actions(1);
+        actions[6] = 0.5;
+        actions[9] = 0.5;
+        actions[10] = 1.0;
+        env.step(&actions);
+        for _ in 0..12 {
+            env.step(&zero_actions(1));
+        }
+        assert_eq!(env.module_graphs[0].alive_count(), 1);
+
+        env.reset();
+        assert_eq!(env.module_graphs[0].alive_count(), 0);
+    }
 }

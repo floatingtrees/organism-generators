@@ -49,5 +49,5 @@ class TestInitialize:
     def test_properties(self, small_config):
         env = organism_env.EvolutionEnv.initialize(small_config)
         assert env.view_res == 32
-        assert env.num_actions == 3
-        assert env.total_channels == 16
+        assert env.num_actions == 11
+        assert env.total_channels == 48

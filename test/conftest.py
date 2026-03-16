@@ -47,8 +47,9 @@ def deterministic_config():
     }
 
 
-NUM_ACTIONS = 3
-TOTAL_CHANNELS = 16
+NUM_ACTIONS = 11  # 10 continuous + 1 build_type
+TOTAL_CHANNELS = 48
+NUM_SCALAR_FEATURES = 5
 
 
 def zero_actions(env):
