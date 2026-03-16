@@ -238,18 +238,21 @@ impl ModuleGraph {
     // Build
     // ------------------------------------------------------------------
 
-    /// Find a free slot for building.
-    /// Prefers segment endpoints over root so modules extend the agent's reach.
-    /// Falls back to root if no segments have free slots.
-    pub fn find_any_free_slot(&self) -> Option<usize> {
-        // First try: segment endpoints with free slots
+    /// Find a free slot for building a given module type.
+    /// Segments attach to root. Non-segments MUST attach to a segment endpoint.
+    pub fn find_free_slot_for(&self, build_type: ModuleType) -> Option<usize> {
+        if build_type == ModuleType::Segment {
+            // Segments attach to root
+            return Some(ROOT_ID);
+        }
+        // Non-segments must attach to a segment endpoint with a free slot
         for m in &self.modules {
             if m.alive && m.module_type == ModuleType::Segment && m.has_free_slot() {
                 return Some(m.id);
             }
         }
-        // Fallback: root (always has unlimited slots)
-        Some(ROOT_ID)
+        // No segment with free slot — can't build non-segment module
+        None
     }
 
     /// Find the nearest module (or root) with a free slot to the given local position.

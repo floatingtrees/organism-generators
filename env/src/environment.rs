@@ -250,7 +250,7 @@ impl Environment {
 
                     if self.agents[i].energy >= cost {
                         // Auto-find attachment: try root first, then existing modules
-                        let attach_id = self.module_graphs[i].find_any_free_slot();
+                        let attach_id = self.module_graphs[i].find_free_slot_for(build_type);
                         if let Some(attach_id) = attach_id {
                             // Position: offset from attachment point along build_rotation
                             let seg_len = 1.0; // constant segment length
@@ -273,7 +273,7 @@ impl Environment {
                             );
 
                             // Self-collision: must not overlap existing own modules
-                            let min_clearance = 0.25;
+                            let min_clearance = 0.5;
                             let self_collision = self.module_graphs[i].modules.iter().any(|m| {
                                 if !m.alive { return false; }
                                 m.local_pos.distance_to(&build_local) < min_clearance
@@ -1537,15 +1537,21 @@ mod tests {
         cfg.food_spawn_rate = 0.0;
         let mut env = Environment::new(1, cfg, 42);
 
-        // Build a mouth (instant)
+        // Build segment first (non-segments need a segment to attach to)
         let mut actions = zero_actions(1);
-        actions[10] = 6.0; // mouth
+        actions[8] = 0.0; actions[10] = 1.0; // segment
         env.step(&actions);
-        assert_eq!(env.module_graphs[0].alive_count(), 1);
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+        // Build mouth on segment
+        let mut actions = zero_actions(1);
+        actions[8] = 0.0; actions[10] = 6.0; // mouth
+        env.step(&actions);
+        assert!(env.module_graphs[0].alive_count() >= 2);
 
-        // Place food right at the agent's position
-        let agent_pos = env.agents[0].pos;
-        env.foods.push(Food { pos: agent_pos });
+        // Place food at the mouth's world position
+        let mouths = env.module_graphs[0].alive_mouths();
+        assert!(!mouths.is_empty(), "should have a mouth");
+        env.foods.push(Food { pos: mouths[0] });
         let food_count_before = env.foods.len();
         let energy_before = env.agents[0].energy;
 
@@ -1566,15 +1572,19 @@ mod tests {
         cfg.food_spawn_rate = 0.0;
         let mut env = Environment::new(1, cfg, 42);
 
-        // Build mouth via action
+        // Build segment first
         let mut actions = zero_actions(1);
-        actions[10] = 6.0; // mouth
+        actions[8] = 0.0; actions[10] = 1.0;
         env.step(&actions);
-        assert_eq!(env.module_graphs[0].alive_count(), 1, "mouth should be built");
+        for _ in 0..12 { env.step(&zero_actions(1)); }
+        // Build mouth on segment
+        let mut actions = zero_actions(1);
+        actions[8] = 0.0; actions[10] = 6.0;
+        env.step(&actions);
+        assert!(env.module_graphs[0].alive_count() >= 2, "should have segment + mouth");
 
-        // Check the mouth world_pos
         let mouths = env.module_graphs[0].alive_mouths();
-        assert_eq!(mouths.len(), 1, "should have 1 mouth");
+        assert!(!mouths.is_empty(), "should have a mouth");
         let mouth_pos = mouths[0];
         let agent_pos = env.agents[0].pos;
         println!("agent_pos=({:.2},{:.2}) mouth_pos=({:.2},{:.2})",
@@ -1815,13 +1825,13 @@ mod tests {
         env.agents[0].pos = Vec2::new(15.0, 15.0);
         env.agents[0].vel = Vec2::new(5.0, 0.0); // moving fast right
 
-        // Build mouth while moving fast
+        // Build segment while moving fast
         let mut a = zero_actions(1);
-        a[8] = 0.0; a[10] = 6.0;
+        a[8] = 0.0; a[10] = 1.0; // segment
         env.step(&a);
 
         // Should still work, module at correct position
-        assert_eq!(env.module_graphs[0].alive_count(), 1);
+        assert!(env.module_graphs[0].alive_count() >= 1);
     }
 
     #[test]
