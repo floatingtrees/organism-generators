@@ -229,14 +229,12 @@ impl Environment {
             self.agents[i].angular_velocity += torque * dt;
 
             // Destroy action (requires high magnitude to trigger — prevents accidental destroys)
+            // Cost is 3 energy whether or not it finds a module to destroy (equal cost for invalid)
             let destroy_pos = Vec2::new(destroy_x, destroy_y);
             if destroy_pos.magnitude() > 2.0 {
-                if self.agents[i].energy >= 3.0 {
-                    if let Some((mod_id, _dist)) = self.module_graphs[i].find_nearest_module(destroy_pos) {
-                        self.agents[i].energy -= 3.0;
-                        self.module_graphs[i].destroy_module(mod_id);
-                        // No food drop on destroy — prevents exploit of build/destroy cycling
-                    }
+                self.agents[i].energy -= 3.0;
+                if let Some((mod_id, _dist)) = self.module_graphs[i].find_nearest_module(destroy_pos) {
+                    self.module_graphs[i].destroy_module(mod_id);
                 }
             }
 

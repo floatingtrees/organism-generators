@@ -414,7 +414,7 @@ def inference_loop(
             video_env.step(act_np)
             obs, scalars, _ = env_observe(video_env, device)
 
-            if (step + 1) % cfg.reset_interval == 0:
+            if (step + 1) % cfg.reset_interval == 0 or video_env.all_dead():
                 video_env.reset()
                 obs, scalars, _ = env_observe(video_env, device)
                 memory = torch.zeros(n_video, MEMORY_DIM, device=device)
